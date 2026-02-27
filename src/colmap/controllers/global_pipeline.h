@@ -30,7 +30,7 @@
 #pragma once
 
 #include "colmap/scene/reconstruction_manager.h"
-#include "colmap/sfm/global_mapper.h"
+#include "colmap/sfm/prior_global_mapper.h"
 #include "colmap/util/base_controller.h"
 
 #include <filesystem>
@@ -62,7 +62,7 @@ struct GlobalPipelineOptions {
   bool decompose_relative_pose = true;
 
   // Options for the global mapper.
-  GlobalMapperOptions mapper;
+  PriorGlobalMapperOptions mapper;
 };
 
 class GlobalPipeline : public BaseController {
