@@ -138,6 +138,13 @@ class GlobalMapper {
   // Getter functions.
   std::shared_ptr<class Reconstruction> Reconstruction() const;
 
+ protected:
+  // Protected accessors for use by subclasses (e.g. PriorGlobalMapper).
+  // These enable extending GlobalMapper behaviour without modifying it.
+  const DatabaseCache& GetDatabaseCache() const { return *database_cache_; }
+  PoseGraph& GetPoseGraph() { return *pose_graph_; }
+  class Reconstruction& GetReconstruction() { return *reconstruction_; }
+
  private:
   std::shared_ptr<const DatabaseCache> database_cache_;
   std::shared_ptr<class PoseGraph> pose_graph_;
