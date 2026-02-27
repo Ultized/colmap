@@ -85,7 +85,7 @@ class PriorGlobalMapper : public GlobalMapper {
   bool Solve(const PriorGlobalMapperOptions& options,
              std::unordered_map<frame_t, int>& cluster_ids);
 
- private:
+ protected:
   // -----------------------------------------------------------------------
   // Helper: check whether effective GPS-constrained solving should be used.
   // Returns true only when options.use_prior_position is true AND the

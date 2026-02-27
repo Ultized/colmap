@@ -38,6 +38,7 @@ COLMAP_ADD_LIBRARY(
         alignment.h alignment.cc
         bundle_adjustment.h bundle_adjustment.cc
         bundle_adjustment_ceres.h bundle_adjustment_ceres.cc
+        lidar_bundle_adjustment.h lidar_bundle_adjustment.cc
         coordinate_frame.h coordinate_frame.cc
         covariance.h covariance.cc
         generalized_pose.h generalized_pose.cc
@@ -63,6 +64,7 @@ COLMAP_ADD_LIBRARY(
         Eigen3::Eigen
         Ceres::ceres
         PoseLib::PoseLib
+        OpenMP::OpenMP_CXX
 )
 
 if(CUDA_ENABLED)
