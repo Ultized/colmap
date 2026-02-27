@@ -32,7 +32,8 @@
 #include "colmap/estimators/alignment.h"
 #include "colmap/estimators/two_view_geometry.h"
 #include "colmap/scene/database_cache.h"
-#include "colmap/sfm/prior_global_mapper.h"
+#include "colmap/scene/lidar_point_cloud.h"
+#include "colmap/sfm/lidar_global_mapper.h"
 #include "colmap/util/misc.h"
 #include "colmap/util/timer.h"
 
@@ -96,12 +97,21 @@ void GlobalPipeline::Run() {
   auto reconstruction = std::make_shared<Reconstruction>();
 
   // Prepare mapper options with top-level options.
-  PriorGlobalMapperOptions mapper_options = options_.mapper;
+  LidarGlobalMapperOptions mapper_options = options_.mapper;
   mapper_options.image_path = options_.image_path;
   mapper_options.num_threads = options_.num_threads;
   mapper_options.random_seed = options_.random_seed;
 
-  PriorGlobalMapper global_mapper(database_cache_);
+  // Optionally load LiDAR point cloud.
+  std::shared_ptr<const LidarPointCloud> lidar_cloud;
+  if (!options_.lidar_point_cloud_path.empty()) {
+    lidar_cloud = LoadLidarPointCloud(options_.lidar_point_cloud_path);
+    LOG(INFO) << "LiDAR point cloud loaded: "
+              << lidar_cloud->Size() << " points."
+              << " LiDAR constraints will be applied during BA.";
+  }
+
+  LidarGlobalMapper global_mapper(database_cache_, lidar_cloud);
   global_mapper.BeginReconstruction(reconstruction);
 
   Timer run_timer;
