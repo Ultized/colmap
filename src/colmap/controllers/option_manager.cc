@@ -768,6 +768,14 @@ void OptionManager::AddGlobalMapperOptions() {
                    &global_mapper->mapper.max_normalized_reproj_error);
   AddDefaultOption("GlobalMapper.min_tri_angle_deg",
                    &global_mapper->mapper.min_tri_angle_deg);
+
+  // Pose prior (GPS) options.
+  AddDefaultOption("GlobalMapper.use_prior_position",
+                   &global_mapper->mapper.use_prior_position);
+  AddDefaultOption("GlobalMapper.use_robust_loss_on_prior_position",
+                   &global_mapper->mapper.use_robust_loss_on_prior_position);
+  AddDefaultOption("GlobalMapper.prior_position_loss_scale",
+                   &global_mapper->mapper.prior_position_loss_scale);
 }
 
 void OptionManager::AddGravityRefinerOptions() {
