@@ -776,6 +776,71 @@ void OptionManager::AddGlobalMapperOptions() {
                    &global_mapper->mapper.use_robust_loss_on_prior_position);
   AddDefaultOption("GlobalMapper.prior_position_loss_scale",
                    &global_mapper->mapper.prior_position_loss_scale);
+
+  // LiDAR point cloud options.
+  // File path (leave empty to disable LiDAR constraints):
+  //   .ply               – ASCII or binary PLY with x/y/z and optional normals
+  //   .txt / .xyz / .*   – ASCII, one point per line: "x y z" or
+  //                        "x y z nx ny nz"
+  AddDefaultOption("GlobalMapper.lidar_point_cloud_path",
+                   &global_mapper->lidar_point_cloud_path);
+
+  // Two-phase KNN matching thresholds (in metres).
+  // Phase 1 = early iterations before poses are stable (loose).
+  // Phase 2 = tight matching once GPS BA has stabilised poses.
+  AddDefaultOption("GlobalMapper.lidar_phase1_max_distance",
+                   &global_mapper->mapper.lidar_matching.phase1_max_distance);
+  AddDefaultOption("GlobalMapper.lidar_phase2_max_distance",
+                   &global_mapper->mapper.lidar_matching.phase2_max_distance);
+
+  // Number of KNN candidates per Point3D before selecting the closest match.
+  AddDefaultOption("GlobalMapper.lidar_knn_candidates",
+                   &global_mapper->mapper.lidar_matching.k_candidates);
+
+  // Statistical outlier rejection: reject matches with dist > mean + k*sigma.
+  AddDefaultOption("GlobalMapper.lidar_stat_sigma",
+                   &global_mapper->mapper.lidar_matching.stat_sigma);
+
+  // Minimum track length: SfM points observed by fewer cameras have
+  // unreliable depth and are excluded from LiDAR matching.
+  // Set to 0 to disable.
+  AddDefaultOption("GlobalMapper.lidar_min_track_length",
+                   &global_mapper->mapper.lidar_matching.min_track_length);
+
+  // Maximum mean reprojection error (pixels) for a SfM point to be used as
+  // a LiDAR anchor. Points above this are likely SfM outliers/noise.
+  // Set to 0 to disable.
+  AddDefaultOption("GlobalMapper.lidar_max_reprojection_error",
+                   &global_mapper->mapper.lidar_matching.max_reprojection_error);
+
+  // Residual weight applied to LiDAR residuals in Phase 1 (<<1 recommended).
+  AddDefaultOption("GlobalMapper.lidar_phase1_weight",
+                   &global_mapper->mapper.lidar_phase1_weight);
+
+  // Residual weight applied to LiDAR residuals in Phase 2.
+  AddDefaultOption("GlobalMapper.lidar_phase2_weight",
+                   &global_mapper->mapper.lidar_phase2_weight);
+
+  // Number of GPS-only BA iterations before the first KNN pass.
+  AddDefaultOption("GlobalMapper.lidar_num_gps_only_ba_iterations",
+                   &global_mapper->mapper.num_gps_only_ba_iterations);
+
+  // Whether to use point-to-plane (true) or point-to-point (false) residuals.
+  AddDefaultOption("GlobalMapper.lidar_use_point_to_plane",
+                   &global_mapper->mapper.lidar_ba.use_point_to_plane);
+
+  // Cauchy loss scale for LiDAR residuals (in metres, ~5 cm default).
+  AddDefaultOption("GlobalMapper.lidar_loss_scale",
+                   &global_mapper->mapper.lidar_ba.loss_scale);
+
+  // Priority design flag:
+  // true (default): camera poses are FIXED during LiDAR BA — only 3D
+  //   point positions move.  GPS BA is the sole driver of pose updates.
+  //   Guarantees visual consistency cannot be broken by LiDAR.
+  // false: LiDAR residuals can also influence camera poses (not recommended
+  //   unless LiDAR coverage is extremely dense and perfectly calibrated).
+  AddDefaultOption("GlobalMapper.lidar_fix_poses_in_lidar_ba",
+                   &global_mapper->mapper.fix_poses_in_lidar_ba);
 }
 
 void OptionManager::AddGravityRefinerOptions() {
