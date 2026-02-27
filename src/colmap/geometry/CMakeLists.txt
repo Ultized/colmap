@@ -41,6 +41,7 @@ COLMAP_ADD_LIBRARY(
         pose.h pose.cc
         pose_prior.h pose_prior.cc
         rigid3.h rigid3.cc
+        kdtree3d.h
         sim3.h sim3.cc
         triangulation.h triangulation.cc
     PUBLIC_LINK_LIBS

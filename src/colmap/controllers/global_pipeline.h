@@ -29,8 +29,9 @@
 
 #pragma once
 
+#include "colmap/scene/lidar_point_cloud.h"
 #include "colmap/scene/reconstruction_manager.h"
-#include "colmap/sfm/prior_global_mapper.h"
+#include "colmap/sfm/lidar_global_mapper.h"
 #include "colmap/util/base_controller.h"
 
 #include <filesystem>
@@ -61,8 +62,12 @@ struct GlobalPipelineOptions {
   // Whether to decompose relative poses from two-view geometries.
   bool decompose_relative_pose = true;
 
-  // Options for the global mapper.
-  PriorGlobalMapperOptions mapper;
+  // Path to a LiDAR point cloud file (.ply or ASCII .xyz/.txt).
+  // Leave empty to disable LiDAR constraints.
+  std::filesystem::path lidar_point_cloud_path;
+
+  // Options for the global mapper (includes GPS + LiDAR sub-options).
+  LidarGlobalMapperOptions mapper;
 };
 
 class GlobalPipeline : public BaseController {
