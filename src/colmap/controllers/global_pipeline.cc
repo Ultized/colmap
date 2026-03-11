@@ -32,9 +32,10 @@
 #include "colmap/estimators/alignment.h"
 #include "colmap/estimators/two_view_geometry.h"
 #include "colmap/scene/database_cache.h"
+#include "colmap/scene/database_sqlite.h"
 #include "colmap/scene/lidar_point_cloud.h"
 #include "colmap/sfm/lidar_global_mapper.h"
-#include "colmap/util/misc.h"
+#include "colmap/sfm/six_dof_prior_global_mapper.h"
 #include "colmap/util/timer.h"
 
 namespace colmap {
@@ -71,17 +72,16 @@ GlobalPipeline::GlobalPipeline(
     std::shared_ptr<Database> database,
     std::shared_ptr<ReconstructionManager> reconstruction_manager)
     : options_(std::move(options)),
+      database_(std::move(THROW_CHECK_NOTNULL(database))),
       reconstruction_manager_(
           std::move(THROW_CHECK_NOTNULL(reconstruction_manager))) {
-  THROW_CHECK_NOTNULL(database);
-
   // Create database cache with relative poses for pose graph.
   DatabaseCache::Options database_cache_options;
   database_cache_options.min_num_matches = options_.min_num_matches;
   database_cache_options.ignore_watermarks = options_.ignore_watermarks;
   database_cache_options.image_names = {options_.image_names.begin(),
                                         options_.image_names.end()};
-  database_cache_ = DatabaseCache::Create(*database, database_cache_options);
+  database_cache_ = DatabaseCache::Create(*database_, database_cache_options);
   if (options_.decompose_relative_pose) {
     MaybeDecomposeRelativePoses(database_cache_.get());
   }
@@ -111,13 +111,52 @@ void GlobalPipeline::Run() {
               << " LiDAR constraints will be applied during BA.";
   }
 
-  LidarGlobalMapper global_mapper(database_cache_, lidar_cloud);
-  global_mapper.BeginReconstruction(reconstruction);
-
   Timer run_timer;
   run_timer.Start();
   std::unordered_map<frame_t, int> cluster_ids;
-  global_mapper.Solve(mapper_options, cluster_ids);
+
+  const bool use_six_dof_priors = options_.mapper.use_6dof_pose_priors &&
+                                  !options_.database_path.empty();
+  std::vector<SixDofPosePrior> six_dof_pose_priors;
+  if (use_six_dof_priors) {
+    six_dof_pose_priors = ReadSixDofPosePriorsFromDatabase(
+        options_.database_path, options_.mapper.six_dof_pose_prior_table);
+    LOG(INFO) << "Loaded " << six_dof_pose_priors.size()
+              << " 6DoF pose priors from table '"
+              << options_.mapper.six_dof_pose_prior_table << "'.";
+  }
+
+  if (use_six_dof_priors && !six_dof_pose_priors.empty()) {
+    SixDofPriorGlobalMapper global_mapper(database_cache_,
+                                          std::move(six_dof_pose_priors),
+                                          lidar_cloud,
+                                          mapper_options.lidar_matching,
+                                          mapper_options.lidar_ba,
+                                          mapper_options.lidar_phase1_weight,
+                                          mapper_options.lidar_phase2_weight,
+                                          mapper_options.fix_poses_in_lidar_ba);
+    if (lidar_cloud && mapper_options.use_lidar_point_to_plane_in_retriangulation) {
+      LOG(INFO) << "6DoF pose prior mapper will apply LiDAR point-to-plane "
+                   "constraints during retriangulation refinement.";
+    } else if (lidar_cloud) {
+      LOG(INFO) << "LiDAR point cloud was loaded, but 6DoF retriangulation "
+                   "LiDAR alignment is disabled. Set "
+                   "GlobalMapper.use_lidar_point_to_plane_in_retriangulation=1 "
+                   "to enable it.";
+    }
+    global_mapper.BeginReconstruction(reconstruction);
+    if (!global_mapper.Solve(mapper_options, cluster_ids)) {
+      LOG(ERROR) << "Global reconstruction failed in 6DoF prior mapper.";
+      return;
+    }
+  } else {
+    LidarGlobalMapper global_mapper(database_cache_, lidar_cloud);
+    global_mapper.BeginReconstruction(reconstruction);
+    if (!global_mapper.Solve(mapper_options, cluster_ids)) {
+      LOG(ERROR) << "Global reconstruction failed in LiDAR/global mapper.";
+      return;
+    }
+  }
   LOG(INFO) << "Reconstruction done in " << run_timer.ElapsedSeconds()
             << " seconds";
 

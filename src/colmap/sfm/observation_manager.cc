@@ -40,6 +40,55 @@
 
 namespace colmap {
 
+namespace {
+
+double ComputeObservationReprojectionError(const ReprojectionErrorType error_type,
+                                           const Point2D& point2D,
+                                           const Point3D& point3D,
+                                           const Image& image,
+                                           const Camera& camera,
+                                           bool* should_filter,
+                                           const double max_squared_error,
+                                           const double max_angular_error_rad) {
+  *should_filter = false;
+
+  switch (error_type) {
+    case ReprojectionErrorType::PIXEL: {
+      const double squared_error = CalculateSquaredReprojectionError(
+          point2D.xy, point3D.xyz, image.CamFromWorld(), camera);
+      *should_filter = squared_error > max_squared_error;
+      return std::sqrt(squared_error);
+    }
+    case ReprojectionErrorType::NORMALIZED: {
+      const Eigen::Vector3d point3D_in_cam = image.CamFromWorld() * point3D.xyz;
+      constexpr double kMinDepth = 1e-12;
+      if (point3D_in_cam.z() < kMinDepth) {
+        *should_filter = true;
+        return 0.0;
+      }
+      const std::optional<Eigen::Vector2d> cam_point = camera.CamFromImg(point2D.xy);
+      if (!cam_point.has_value()) {
+        *should_filter = true;
+        return 0.0;
+      }
+      const Eigen::Vector2d reproj_point = point3D_in_cam.hnormalized().head<2>();
+      const double squared_error = (reproj_point - *cam_point).squaredNorm();
+      *should_filter = squared_error > max_squared_error;
+      return std::sqrt(squared_error);
+    }
+    case ReprojectionErrorType::ANGULAR: {
+      const double error = CalculateAngularReprojectionError(
+          point2D.xy, point3D.xyz, image.CamFromWorld(), camera);
+      *should_filter = error > max_angular_error_rad;
+      return RadToDeg(error);
+    }
+  }
+
+  return 0.0;
+}
+
+}  // namespace
+
 bool MergeAndFilterReconstructions(const double max_reproj_error,
                                    const Reconstruction& src_reconstruction,
                                    Reconstruction& tgt_reconstruction) {
@@ -424,13 +473,24 @@ size_t ObservationManager::FilterPoints3DWithLargeReprojectionError(
     const double max_error,
     const std::unordered_set<point3D_t>& point3D_ids,
     const ReprojectionErrorType error_type) {
+  return FilterObservationsWithLargeReprojectionError(
+      max_error, point3D_ids, error_type);
+}
+
+size_t ObservationManager::FilterObservationsWithLargeReprojectionError(
+    const double max_error,
+    const std::unordered_set<point3D_t>& point3D_ids,
+    const ReprojectionErrorType error_type) {
   size_t num_filtered_observations = 0;
 
   // Precompute squared/converted thresholds to avoid redundant computations.
   const double max_squared_error = max_error * max_error;
   const double max_angular_error_rad = DegToRad(max_error);
 
-  for (const auto point3D_id : point3D_ids) {
+  std::vector<point3D_t> sorted_point3D_ids(point3D_ids.begin(), point3D_ids.end());
+  std::sort(sorted_point3D_ids.begin(), sorted_point3D_ids.end());
+
+  for (const auto point3D_id : sorted_point3D_ids) {
     if (!reconstruction_.ExistsPoint3D(point3D_id)) {
       continue;
     }
@@ -452,46 +512,15 @@ size_t ObservationManager::FilterPoints3DWithLargeReprojectionError(
       const Point2D& point2D = image.Point2D(track_el.point2D_idx);
 
       bool should_filter = false;
-      double observation_error = 0.0;
-
-      switch (error_type) {
-        case ReprojectionErrorType::PIXEL: {
-          const double squared_error = CalculateSquaredReprojectionError(
-              point2D.xy, point3D.xyz, image.CamFromWorld(), camera);
-          should_filter = squared_error > max_squared_error;
-          observation_error = std::sqrt(squared_error);
-          break;
-        }
-        case ReprojectionErrorType::NORMALIZED: {
-          const Eigen::Vector3d point3D_in_cam =
-              image.CamFromWorld() * point3D.xyz;
-          constexpr double kMinDepth = 1e-12;
-          if (point3D_in_cam.z() < kMinDepth) {
-            should_filter = true;
-            break;
-          }
-          const std::optional<Eigen::Vector2d> cam_point =
-              camera.CamFromImg(point2D.xy);
-          if (!cam_point.has_value()) {
-            should_filter = true;
-            break;
-          }
-          const Eigen::Vector2d reproj_point =
-              point3D_in_cam.hnormalized().head<2>();
-          const double squared_error =
-              (reproj_point - *cam_point).squaredNorm();
-          should_filter = squared_error > max_squared_error;
-          observation_error = std::sqrt(squared_error);
-          break;
-        }
-        case ReprojectionErrorType::ANGULAR: {
-          const double error = CalculateAngularReprojectionError(
-              point2D.xy, point3D.xyz, image.CamFromWorld(), camera);
-          should_filter = error > max_angular_error_rad;
-          observation_error = RadToDeg(error);
-          break;
-        }
-      }
+      const double observation_error = ComputeObservationReprojectionError(
+          error_type,
+          point2D,
+          point3D,
+          image,
+          camera,
+          &should_filter,
+          max_squared_error,
+          max_angular_error_rad);
 
       if (should_filter) {
         track_els_to_delete.push_back(track_el);
@@ -499,6 +528,15 @@ size_t ObservationManager::FilterPoints3DWithLargeReprojectionError(
         error_sum += observation_error;
       }
     }
+
+    std::sort(track_els_to_delete.begin(),
+              track_els_to_delete.end(),
+              [](const auto& lhs, const auto& rhs) {
+                if (lhs.image_id != rhs.image_id) {
+                  return lhs.image_id < rhs.image_id;
+                }
+                return lhs.point2D_idx < rhs.point2D_idx;
+              });
 
     if (track_els_to_delete.size() >= point3D.track.Length() - 1) {
       num_filtered_observations += point3D.track.Length();

@@ -66,7 +66,7 @@ struct LidarGlobalMapperOptions : public PriorGlobalMapperOptions {
   double lidar_phase1_weight = 0.05;
 
   // Override weight for Phase 2 BA.
-  double lidar_phase2_weight = 1.0;
+  double lidar_phase2_weight = 0.5;
 
   // -----------------------------------------------------------------------
   // Phase control.
@@ -90,7 +90,7 @@ struct LidarGlobalMapperOptions : public PriorGlobalMapperOptions {
   //
   // Set to false only if you want LiDAR to also refine camera poses.
   // ---------------------------------------------------------------------------
-  bool fix_poses_in_lidar_ba = true;
+  bool fix_poses_in_lidar_ba = false;
 };
 
 // ---------------------------------------------------------------------------

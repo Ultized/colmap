@@ -349,6 +349,7 @@ PosePriorBundleAdjustmentBackendOptions::operator=(
 
 bool PosePriorBundleAdjustmentOptions::Check() const {
   CHECK_OPTION_GT(prior_position_fallback_stddev, 0);
+  CHECK_OPTION_GT(prior_rotation_fallback_stddev_rad, 0);
   return THROW_CHECK_NOTNULL(ceres)->Check();
 }
 
@@ -365,6 +366,28 @@ std::unique_ptr<BundleAdjuster> CreatePosePriorBundleAdjuster(
                                                 config,
                                                 std::move(pose_priors),
                                                 reconstruction);
+  }
+  LOG(FATAL_THROW) << "Unknown bundle adjustment backend: "
+                   << static_cast<int>(options.backend);
+  return nullptr;
+}
+
+std::unique_ptr<BundleAdjuster> CreateAbsolutePosePriorBundleAdjuster(
+    const BundleAdjustmentOptions& options,
+    const PosePriorBundleAdjustmentOptions& prior_options,
+    double prior_rotation_fallback_stddev_rad,
+    const BundleAdjustmentConfig& config,
+    std::vector<AbsolutePosePriorConstraint> pose_priors,
+    Reconstruction& reconstruction) {
+  switch (options.backend) {
+    case BundleAdjustmentBackend::CERES:
+      return CreateAbsolutePosePriorCeresBundleAdjuster(
+          options,
+          prior_options,
+          prior_rotation_fallback_stddev_rad,
+          config,
+          std::move(pose_priors),
+          reconstruction);
   }
   LOG(FATAL_THROW) << "Unknown bundle adjustment backend: "
                    << static_cast<int>(options.backend);

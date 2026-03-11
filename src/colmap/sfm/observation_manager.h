@@ -132,6 +132,24 @@ class ObservationManager {
       const std::unordered_set<point3D_t>& point3D_ids,
       ReprojectionErrorType error_type = ReprojectionErrorType::PIXEL);
 
+    // Filter individual observations with large reprojection error in a stable,
+    // deterministic point iteration order. Bad observations are removed first,
+    // and a point is deleted only if fewer than two track elements would remain.
+    // This is intended for cleanup stages that want observation-level trimming
+    // rather than aggressively dropping whole points up front.
+    //
+    // @param max_error       Maximum error threshold. For PIXEL and NORMALIZED,
+    //                        this is the reprojection error. For ANGULAR, this
+    //                        is the angular error in degrees.
+    // @param point3D_ids     The points whose observations should be filtered.
+    // @param error_type      Type of error metric to use.
+    //
+    // @return                The number of filtered observations.
+    size_t FilterObservationsWithLargeReprojectionError(
+      double max_error,
+      const std::unordered_set<point3D_t>& point3D_ids,
+      ReprojectionErrorType error_type = ReprojectionErrorType::PIXEL);
+
   // Filter frames without observations or bogus camera parameters.
   //
   // @return    The identifiers of the filtered frames.

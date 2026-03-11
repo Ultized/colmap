@@ -29,7 +29,7 @@
 
 #pragma once
 
-#include "colmap/scene/lidar_point_cloud.h"
+#include "colmap/scene/database.h"
 #include "colmap/scene/reconstruction_manager.h"
 #include "colmap/sfm/lidar_global_mapper.h"
 #include "colmap/util/base_controller.h"
@@ -49,6 +49,10 @@ struct GlobalPipelineOptions {
 
   // Names of images to reconstruct. If empty, all images are used.
   std::vector<std::string> image_names;
+
+  // Database path. Used for optional custom prior readers outside the
+  // standard Database abstraction.
+  std::filesystem::path database_path;
 
   // The image path at which to find the images to extract point colors.
   std::filesystem::path image_path;
@@ -80,6 +84,7 @@ class GlobalPipeline : public BaseController {
 
  private:
   const GlobalPipelineOptions options_;
+  std::shared_ptr<Database> database_;
   std::shared_ptr<DatabaseCache> database_cache_;
   std::shared_ptr<ReconstructionManager> reconstruction_manager_;
 };

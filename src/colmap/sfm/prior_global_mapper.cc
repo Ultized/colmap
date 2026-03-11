@@ -35,6 +35,7 @@
 #include "colmap/math/math.h"
 #include "colmap/scene/projection.h"
 #include "colmap/sfm/observation_manager.h"
+#include "colmap/sfm/incremental_mapper.h"
 #include "colmap/util/logging.h"
 #include "colmap/util/misc.h"
 #include "colmap/util/timer.h"
@@ -44,6 +45,15 @@
 
 namespace colmap {
 namespace {
+
+void SetImageCenterFromPrior(Image& image, const Eigen::Vector3d& position) {
+  Frame& frame = *image.FramePtr();
+  const Rigid3d& cam_from_world = image.CamFromWorld();
+  const Eigen::Vector3d translation =
+      -(cam_from_world.rotation().toRotationMatrix() * position);
+  frame.SetCamFromWorld(
+      image.CameraId(), Rigid3d(cam_from_world.rotation(), translation));
+}
 
 // Replicate the parent's option-initialization logic (the original lives in
 // an anonymous namespace in global_mapper.cc and is therefore inaccessible).
@@ -108,23 +118,117 @@ void PriorGlobalMapper::RestoreTranslationsFromPriors(
     const image_t image_id = static_cast<image_t>(prior.corr_data_id.id);
     if (!recon.ExistsImage(image_id)) continue;
 
-    const Image& image = recon.Image(image_id);
+    Image& image = recon.Image(image_id);
     if (!image.HasPose()) continue;
 
-    // Set t = -R * C_gps so that the camera center equals the GPS position.
-    // This anchors the metric origin for the subsequent global positioning.
-    Frame& frame = *image.FramePtr();
-    Rigid3d& rig_from_world = frame.RigFromWorld();
-    rig_from_world.translation() =
-        -(rig_from_world.rotation().toRotationMatrix() * prior.position);
+    // Set the full camera center from the prior while preserving the current
+    // camera rotation. This also handles non-reference rig cameras correctly.
+    SetImageCenterFromPrior(image, prior.position);
     ++restored;
   }
   LOG(INFO) << "Restored GPS-seeded translations for " << restored
             << " cameras after rotation averaging.";
 }
 
+size_t PriorGlobalMapper::EnforceMaxPositionPriorDeviation(
+    const std::vector<PosePrior>& pose_priors,
+    double max_position_prior_deviation,
+    double delete_position_prior_deviation,
+    int max_observations,
+    bool clamp_to_prior,
+    const char* stage_name) {
+  if (max_position_prior_deviation <= 0 && delete_position_prior_deviation <= 0) {
+    return 0;
+  }
+
+  auto& recon = GetReconstruction();
+  size_t num_exceeded = 0;
+  size_t num_clamped = 0;
+  size_t num_deleted_frames = 0;
+  size_t num_deleted_images = 0;
+  double max_observed_deviation = 0.0;
+  std::unordered_set<frame_t> frame_ids_to_delete;
+
+  for (const auto& prior : pose_priors) {
+    if (!prior.HasPosition()) continue;
+    if (prior.corr_data_id.sensor_id.type != SensorType::CAMERA) continue;
+
+    const image_t image_id = static_cast<image_t>(prior.corr_data_id.id);
+    if (!recon.ExistsImage(image_id)) continue;
+
+    Image& image = recon.Image(image_id);
+    if (!image.HasPose()) continue;
+    if (max_observations >= 0 &&
+        static_cast<int>(image.NumPoints3D()) > max_observations) {
+      continue;
+    }
+
+    const double deviation =
+        (image.ProjectionCenter() - prior.position).norm();
+    const bool exceeds_clamp_threshold =
+        max_position_prior_deviation > 0 &&
+        deviation > max_position_prior_deviation;
+    const bool exceeds_delete_threshold =
+        delete_position_prior_deviation > 0 &&
+        deviation > delete_position_prior_deviation;
+    if (!exceeds_clamp_threshold && !exceeds_delete_threshold) continue;
+
+    ++num_exceeded;
+    max_observed_deviation = std::max(max_observed_deviation, deviation);
+
+    if (exceeds_delete_threshold && image.HasFrameId()) {
+      frame_ids_to_delete.insert(image.FrameId());
+    } else if (clamp_to_prior && exceeds_clamp_threshold) {
+      SetImageCenterFromPrior(image, prior.position);
+      ++num_clamped;
+    }
+  }
+
+  for (const frame_t frame_id : frame_ids_to_delete) {
+    if (!recon.ExistsFrame(frame_id)) {
+      continue;
+    }
+    const Frame& frame = recon.Frame(frame_id);
+    num_deleted_images +=
+        static_cast<size_t>(std::distance(frame.ImageIds().begin(),
+                                          frame.ImageIds().end()));
+    recon.DeRegisterFrame(frame_id);
+    ++num_deleted_frames;
+  }
+
+  if (num_exceeded > 0) {
+    std::ostringstream message;
+    message << "[PriorGlobalMapper] " << stage_name << ": found "
+            << num_exceeded << " frame(s) whose center deviated more than ";
+    if (max_position_prior_deviation > 0) {
+      message << max_position_prior_deviation << " m";
+    } else {
+      message << delete_position_prior_deviation << " m";
+    }
+    message << " from their position prior. Max deviation was "
+            << max_observed_deviation << " m.";
+    if (clamp_to_prior && num_clamped > 0) {
+      message << " Clamped " << num_clamped << " frame(s).";
+    }
+    if (num_deleted_frames > 0) {
+      message << " Deleted " << num_deleted_frames << " frame(s) covering "
+              << num_deleted_images << " image(s) whose deviation exceeded "
+              << delete_position_prior_deviation << " m.";
+    }
+    if (max_observations >= 0) {
+      message << " Eligibility was limited to frames with <= "
+              << max_observations << " Point3D observations.";
+    }
+    LOG(WARNING) << message.str();
+  }
+
+  return clamp_to_prior ? (num_clamped + num_deleted_frames) : num_exceeded;
+}
+
 bool PriorGlobalMapper::PriorGlobalPositioning(
     const GlobalPositionerOptions& options,
+    double max_position_prior_deviation,
+    bool clamp_positions_to_prior,
     double max_angular_reproj_error_deg,
     double max_normalized_reproj_error,
     double min_tri_angle_deg) {
@@ -136,6 +240,13 @@ bool PriorGlobalMapper::PriorGlobalPositioning(
   if (!RunGlobalPositioning(custom_opts, GetPoseGraph(), GetReconstruction())) {
     return false;
   }
+
+  EnforceMaxPositionPriorDeviation(database_cache_->PosePriors(),
+                                   max_position_prior_deviation,
+                                   -1.0,
+                                   -1,
+                                   clamp_positions_to_prior,
+                                   "after global positioning");
 
   auto& recon = GetReconstruction();
   ObservationManager obs_manager(recon);
@@ -440,6 +551,8 @@ bool PriorGlobalMapper::Solve(const PriorGlobalMapperOptions& options,
     bool ok;
     if (use_prior) {
       ok = PriorGlobalPositioning(opts.global_positioning,
+                                   opts.max_position_prior_deviation,
+                                   opts.clamp_positions_to_prior_after_global_positioning,
                                    opts.max_angular_reproj_error_deg,
                                    opts.max_normalized_reproj_error,
                                    opts.min_tri_angle_deg);

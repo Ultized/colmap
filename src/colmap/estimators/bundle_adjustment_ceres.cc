@@ -34,6 +34,7 @@
 #include "colmap/estimators/cost_functions/pose_prior.h"
 #include "colmap/estimators/cost_functions/reprojection_error.h"
 #include "colmap/estimators/cost_functions/utils.h"
+#include "colmap/geometry/pose.h"
 #include "colmap/util/cuda.h"
 #include "colmap/util/misc.h"
 #include "colmap/util/threading.h"
@@ -234,6 +235,7 @@ bool CeresBundleAdjustmentOptions::Check() const {
 
 bool CeresPosePriorBundleAdjustmentOptions::Check() const {
   CHECK_OPTION_GT(prior_position_loss_scale, 0);
+  CHECK_OPTION_GT(prior_pose_loss_scale, 0);
   return true;
 }
 
@@ -905,6 +907,9 @@ class PosePriorBundleAdjuster : public CeresBundleAdjuster {
     std::shared_ptr<ceres::Problem> problem =
         default_bundle_adjuster_->Problem();
     if (problem->NumResiduals() == 0) {
+      LOG(ERROR) << "Pose-prior BA has zero residuals. This usually means "
+                    "no valid images or prior constraints made it into the "
+                    "problem.";
       return std::make_shared<BundleAdjustmentSummary>();
     }
 
@@ -1046,6 +1051,164 @@ class PosePriorBundleAdjuster : public CeresBundleAdjuster {
   Sim3d normalized_from_metric_;
 };
 
+class AbsolutePosePriorBundleAdjuster : public CeresBundleAdjuster {
+ public:
+  using PoseCovariance = Eigen::Matrix<double, 6, 6>;
+
+  AbsolutePosePriorBundleAdjuster(
+      const BundleAdjustmentOptions& options,
+      const PosePriorBundleAdjustmentOptions& prior_options,
+      double prior_rotation_fallback_stddev_rad,
+      const BundleAdjustmentConfig& config,
+      std::vector<AbsolutePosePriorConstraint> pose_priors,
+      Reconstruction& reconstruction)
+      : CeresBundleAdjuster(options, config),
+        prior_options_(prior_options),
+        prior_rotation_fallback_stddev_rad_(prior_rotation_fallback_stddev_rad),
+        pose_priors_(std::move(pose_priors)),
+        reconstruction_(reconstruction) {
+    THROW_CHECK(prior_options_.Check());
+    THROW_CHECK_GT(prior_rotation_fallback_stddev_rad_, 0);
+
+    pose_priors_.erase(
+        std::remove_if(pose_priors_.begin(),
+                       pose_priors_.end(),
+                       [this](const auto& pose_prior) {
+                         return !pose_prior.HasPose() ||
+                                !config_.HasImage(pose_prior.image_id);
+                       }),
+        pose_priors_.end());
+
+    const bool use_absolute_pose_priors = !pose_priors_.empty();
+    if (use_absolute_pose_priors) {
+      normalized_from_metric_ = Sim3d();
+    } else {
+      config_.FixGauge(BundleAdjustmentGauge::THREE_POINTS);
+    }
+
+    default_bundle_adjuster_ = std::make_unique<DefaultBundleAdjuster>(
+        options_, config_, reconstruction_);
+
+    if (use_absolute_pose_priors) {
+      prior_loss_function_ = CreateLossFunction(
+          prior_options_.ceres->prior_pose_loss_function_type,
+          prior_options_.ceres->prior_pose_loss_scale);
+
+      const std::set<image_t>& parameterized_image_ids =
+          default_bundle_adjuster_->ParameterizedImageIds();
+      for (const auto& pose_prior : pose_priors_) {
+        if (parameterized_image_ids.count(pose_prior.image_id) > 0) {
+          AddImagePosePriorToProblem(pose_prior, reconstruction_);
+        }
+      }
+    }
+  }
+
+  std::shared_ptr<BundleAdjustmentSummary> Solve() override {
+    std::shared_ptr<ceres::Problem> problem =
+        default_bundle_adjuster_->Problem();
+    if (problem->NumResiduals() == 0) {
+      LOG(ERROR) << "Absolute-pose-prior BA has zero residuals. "
+                    "This usually means no valid images with finite poses or "
+                    "no active 6DoF prior constraints made it into the "
+                    "problem.";
+      return std::make_shared<BundleAdjustmentSummary>();
+    }
+
+    const ceres::Solver::Options solver_options =
+        options_.ceres->CreateSolverOptions(config_, *problem);
+
+    ceres::Solver::Summary ceres_summary;
+    ceres::Solve(solver_options, problem.get(), &ceres_summary);
+
+    if (options_.print_summary || VLOG_IS_ON(1)) {
+      PrintSolverSummary(ceres_summary,
+                         "Absolute Pose Prior Bundle adjustment report");
+    }
+
+    return CeresBundleAdjustmentSummary::Create(ceres_summary);
+  }
+
+  std::shared_ptr<ceres::Problem>& Problem() override {
+    return default_bundle_adjuster_->Problem();
+  }
+
+ private:
+  PoseCovariance ComposeNormalizedPoseCovariance(
+      const AbsolutePosePriorConstraint& pose_prior) const {
+    const double position_fallback_variance =
+        prior_options_.prior_position_fallback_stddev *
+        prior_options_.prior_position_fallback_stddev;
+    const double rotation_fallback_variance =
+        prior_rotation_fallback_stddev_rad_ *
+        prior_rotation_fallback_stddev_rad_;
+
+    PoseCovariance pose_covariance = PoseCovariance::Zero();
+    pose_covariance.topLeftCorner<3, 3>() =
+        pose_prior.HasRotationCov()
+            ? pose_prior.rotation_covariance
+            : rotation_fallback_variance * Eigen::Matrix3d::Identity();
+    pose_covariance.bottomRightCorner<3, 3>() =
+        pose_prior.HasPositionCov()
+            ? pose_prior.position_covariance
+            : position_fallback_variance * Eigen::Matrix3d::Identity();
+    pose_covariance.bottomRightCorner<3, 3>() *=
+        normalized_from_metric_.scale() * normalized_from_metric_.scale();
+    return pose_covariance;
+  }
+
+  void AddImagePosePriorToProblem(
+      const AbsolutePosePriorConstraint& pose_prior,
+      Reconstruction& reconstruction) {
+    Image& image = reconstruction.Image(pose_prior.image_id);
+
+    const bool constant_sensor_from_rig =
+        !options_.refine_sensor_from_rig ||
+        config_.HasConstantSensorFromRigPose(image.CameraPtr()->SensorId());
+    const bool constant_rig_from_world =
+        !options_.refine_rig_from_world ||
+        config_.HasConstantRigFromWorldPose(image.FrameId());
+    if (constant_sensor_from_rig && constant_rig_from_world) {
+      return;
+    }
+
+    ceres::Problem& problem = *default_bundle_adjuster_->Problem();
+    Frame& frame = *image.FramePtr();
+    Rigid3d& rig_from_world = frame.RigFromWorld();
+    const Rigid3d normalized_cam_from_world =
+        TransformCameraWorld(normalized_from_metric_, pose_prior.cam_from_world);
+    const PoseCovariance normalized_pose_covariance =
+        ComposeNormalizedPoseCovariance(pose_prior);
+
+    if (image.IsRefInFrame()) {
+      problem.AddResidualBlock(
+          CovarianceWeightedCostFunctor<AbsolutePosePriorCostFunctor>::Create(
+              normalized_pose_covariance, normalized_cam_from_world),
+          prior_loss_function_.get(),
+          rig_from_world.params.data());
+    } else {
+      Rigid3d& cam_from_rig =
+          frame.RigPtr()->SensorFromRig(image.CameraPtr()->SensorId());
+      problem.AddResidualBlock(
+          CovarianceWeightedCostFunctor<AbsoluteRigPosePriorCostFunctor>::
+              Create(normalized_pose_covariance, normalized_cam_from_world),
+          prior_loss_function_.get(),
+          cam_from_rig.params.data(),
+          rig_from_world.params.data());
+    }
+  }
+
+  PosePriorBundleAdjustmentOptions prior_options_;
+  double prior_rotation_fallback_stddev_rad_;
+  std::vector<AbsolutePosePriorConstraint> pose_priors_;
+  Reconstruction& reconstruction_;
+
+  std::unique_ptr<DefaultBundleAdjuster> default_bundle_adjuster_;
+  std::unique_ptr<ceres::LossFunction> prior_loss_function_;
+
+  Sim3d normalized_from_metric_;
+};
+
 }  // namespace
 
 std::unique_ptr<BundleAdjuster> CreateDefaultCeresBundleAdjuster(
@@ -1064,6 +1227,22 @@ std::unique_ptr<BundleAdjuster> CreatePosePriorCeresBundleAdjuster(
     Reconstruction& reconstruction) {
   return std::make_unique<PosePriorBundleAdjuster>(
       options, prior_options, config, std::move(pose_priors), reconstruction);
+}
+
+std::unique_ptr<BundleAdjuster> CreateAbsolutePosePriorCeresBundleAdjuster(
+    const BundleAdjustmentOptions& options,
+    const PosePriorBundleAdjustmentOptions& prior_options,
+    double prior_rotation_fallback_stddev_rad,
+    const BundleAdjustmentConfig& config,
+    std::vector<AbsolutePosePriorConstraint> pose_priors,
+    Reconstruction& reconstruction) {
+  return std::make_unique<AbsolutePosePriorBundleAdjuster>(
+      options,
+      prior_options,
+      prior_rotation_fallback_stddev_rad,
+      config,
+      std::move(pose_priors),
+      reconstruction);
 }
 
 void PrintSolverSummary(const ceres::Solver::Summary& summary,

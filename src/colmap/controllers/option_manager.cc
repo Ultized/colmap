@@ -772,6 +772,76 @@ void OptionManager::AddGlobalMapperOptions() {
   // Pose prior (GPS) options.
   AddDefaultOption("GlobalMapper.use_prior_position",
                    &global_mapper->mapper.use_prior_position);
+  AddDefaultOption("GlobalMapper.use_6dof_pose_priors",
+                   &global_mapper->mapper.use_6dof_pose_priors);
+  AddDefaultOption("GlobalMapper.six_dof_pose_prior_table",
+                   &global_mapper->mapper.six_dof_pose_prior_table);
+  AddDefaultOption("GlobalMapper.six_dof_prior_rotation_stddev_deg",
+                   &global_mapper->mapper.six_dof_prior_rotation_stddev_deg);
+  AddDefaultOption("GlobalMapper.use_6dof_pose_graph_filtering",
+                   &global_mapper->mapper.use_6dof_pose_graph_filtering);
+  AddDefaultOption("GlobalMapper.max_6dof_pose_graph_rotation_error_deg",
+                   &global_mapper->mapper.max_6dof_pose_graph_rotation_error_deg);
+  AddDefaultOption(
+      "GlobalMapper.max_6dof_pose_graph_translation_direction_error_deg",
+      &global_mapper->mapper
+           .max_6dof_pose_graph_translation_direction_error_deg);
+  AddDefaultOption("GlobalMapper.max_6dof_rotation_prior_deviation_deg",
+                   &global_mapper->mapper.max_6dof_rotation_prior_deviation_deg);
+  AddDefaultOption("GlobalMapper.use_6dof_retriangulation_refinement",
+                   &global_mapper->mapper.use_6dof_retriangulation_refinement);
+  AddDefaultOption("GlobalMapper.log_6dof_retriangulation_debug_snapshots",
+                   &global_mapper->mapper
+                        .log_6dof_retriangulation_debug_snapshots);
+  AddDefaultOption("GlobalMapper.max_position_prior_deviation",
+                   &global_mapper->mapper.max_position_prior_deviation);
+  AddDefaultOption("GlobalMapper.min_mean_reprojection_error",
+                   &global_mapper->mapper.min_mean_reprojection_error);
+  AddDefaultOption("GlobalMapper.min_observations_per_registered_image",
+                   &global_mapper->mapper.min_observations_per_registered_image);
+  AddDefaultOption(
+      "GlobalMapper.clamp_positions_to_prior_after_global_positioning",
+      &global_mapper->mapper.clamp_positions_to_prior_after_global_positioning);
+  AddDefaultOption("GlobalMapper.clamp_positions_to_prior_after_optimization",
+                   &global_mapper->mapper
+                        .clamp_positions_to_prior_after_optimization);
+    AddDefaultOption(
+     "GlobalMapper.clamp_positions_to_prior_after_optimization_max_observations",
+     &global_mapper->mapper
+       .clamp_positions_to_prior_after_optimization_max_observations);
+    AddDefaultOption(
+     "GlobalMapper.delete_frames_with_position_prior_deviation_after_optimization",
+     &global_mapper->mapper
+       .delete_frames_with_position_prior_deviation_after_optimization);
+  AddDefaultOption("GlobalMapper.run_bundle_adjustment_after_pose_enforcement",
+                   &global_mapper->mapper
+                        .run_bundle_adjustment_after_pose_enforcement);
+    AddDefaultOption("GlobalMapper.post_enforcement_max_reprojection_error_px",
+            &global_mapper->mapper
+              .post_enforcement_max_reprojection_error_px);
+    AddDefaultOption(
+     "GlobalMapper.use_risk_stratified_prior_weights_in_final_joint_ba",
+     &global_mapper->mapper
+       .use_risk_stratified_prior_weights_in_final_joint_ba);
+    AddDefaultOption("GlobalMapper.final_joint_ba_high_risk_max_observations",
+            &global_mapper->mapper
+              .final_joint_ba_high_risk_max_observations);
+    AddDefaultOption(
+     "GlobalMapper.final_joint_ba_medium_risk_position_prior_deviation",
+     &global_mapper->mapper
+       .final_joint_ba_medium_risk_position_prior_deviation);
+    AddDefaultOption(
+     "GlobalMapper.final_joint_ba_high_risk_position_prior_deviation",
+     &global_mapper->mapper
+       .final_joint_ba_high_risk_position_prior_deviation);
+    AddDefaultOption(
+     "GlobalMapper.final_joint_ba_medium_risk_prior_weight_multiplier",
+     &global_mapper->mapper
+       .final_joint_ba_medium_risk_prior_weight_multiplier);
+    AddDefaultOption(
+     "GlobalMapper.final_joint_ba_high_risk_prior_weight_multiplier",
+     &global_mapper->mapper
+       .final_joint_ba_high_risk_prior_weight_multiplier);
   AddDefaultOption("GlobalMapper.use_robust_loss_on_prior_position",
                    &global_mapper->mapper.use_robust_loss_on_prior_position);
   AddDefaultOption("GlobalMapper.prior_position_loss_scale",
@@ -784,6 +854,38 @@ void OptionManager::AddGlobalMapperOptions() {
   //                        "x y z nx ny nz"
   AddDefaultOption("GlobalMapper.lidar_point_cloud_path",
                    &global_mapper->lidar_point_cloud_path);
+
+    AddDefaultOption(
+      "GlobalMapper.use_lidar_point_to_plane_in_retriangulation",
+      &global_mapper->mapper.use_lidar_point_to_plane_in_retriangulation);
+    AddDefaultOption(
+      "GlobalMapper.lidar_retriangulation_max_reprojection_error",
+      &global_mapper->mapper.lidar_retriangulation_max_reprojection_error);
+    AddDefaultOption(
+      "GlobalMapper.lidar_retriangulation_early_min_track_length",
+      &global_mapper->mapper.lidar_retriangulation_early_min_track_length);
+    AddDefaultOption(
+      "GlobalMapper.lidar_retriangulation_early_max_mean_reprojection_error",
+      &global_mapper->mapper
+           .lidar_retriangulation_early_max_mean_reprojection_error);
+    AddDefaultOption(
+      "GlobalMapper.retriangulation_refinement_max_refinements",
+      &global_mapper->mapper.retriangulation_refinement_max_refinements);
+    AddDefaultOption(
+      "GlobalMapper.retriangulation_refinement_ba_max_num_iterations",
+      &global_mapper->mapper.retriangulation_refinement_ba_max_num_iterations);
+    AddDefaultOption(
+      "GlobalMapper.retriangulation_refinement_ba_max_linear_solver_iterations",
+      &global_mapper->mapper
+           .retriangulation_refinement_ba_max_linear_solver_iterations);
+    AddDefaultOption(
+      "GlobalMapper.lidar_retriangulation_early_post_alignment_max_reprojection_error_px",
+      &global_mapper->mapper
+           .lidar_retriangulation_early_post_alignment_max_reprojection_error_px);
+      AddDefaultOption(
+        "GlobalMapper.use_lidar_point_to_plane_only_in_final_retriangulation",
+        &global_mapper->mapper
+           .use_lidar_point_to_plane_only_in_final_retriangulation);
 
   // Two-phase KNN matching thresholds (in metres).
   // Phase 1 = early iterations before poses are stable (loose).
