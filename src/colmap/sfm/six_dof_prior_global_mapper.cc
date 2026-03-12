@@ -3,6 +3,7 @@
 
 #include "colmap/sfm/six_dof_prior_global_mapper.h"
 
+#include "colmap/estimators/solvers/similarity_transform.h"
 #include "colmap/estimators/bundle_adjustment_ceres.h"
 #include "colmap/estimators/cost_functions/lidar.h"
 #include "colmap/estimators/lidar_bundle_adjustment.h"
@@ -95,6 +96,15 @@ bool ImageHasFinitePose(const Image& image) {
 
 bool IsFinalRetriangulationStage(const char* stage_name) {
   return stage_name != nullptr && std::string(stage_name) == "final";
+}
+
+bool UseTightMetricAlignmentPhase(const char* stage_name) {
+  if (stage_name == nullptr) {
+    return true;
+  }
+  const std::string stage(stage_name);
+  return stage.find("retriangulation") == std::string::npos ||
+         stage.find("final") != std::string::npos;
 }
 
 std::unordered_set<point3D_t> CollectStableEarlyLidarAnchorPointIds(
@@ -1194,6 +1204,7 @@ bool SixDofPriorGlobalMapper::RunLidarPointToPlaneRetriangulationAlignment(
                               ceres::TAKE_OWNERSHIP));
 
     int added = 0;
+    int skipped_missing_normals = 0;
     for (const auto& constraint : constraints) {
       if (!recon.ExistsPoint3D(constraint.point3D_id)) {
         continue;
@@ -1207,7 +1218,11 @@ bool SixDofPriorGlobalMapper::RunLidarPointToPlaneRetriangulationAlignment(
       }
 
       ceres::CostFunction* cost = nullptr;
-      if (constraint.use_plane && lidar_options.use_point_to_plane) {
+      if (lidar_options.use_point_to_plane) {
+        if (!constraint.use_plane) {
+          ++skipped_missing_normals;
+          continue;
+        }
         cost = PointToPlaneCostFunctor::Create(constraint.xyz_lidar,
                                                constraint.normal);
       } else {
@@ -1220,6 +1235,12 @@ bool SixDofPriorGlobalMapper::RunLidarPointToPlaneRetriangulationAlignment(
 
     LOG(INFO) << "[6DoF+Lidar final BA] Added " << added
               << " LiDAR residuals with active 6DoF pose priors.";
+    if (skipped_missing_normals > 0) {
+      LOG(INFO) << "[6DoF+Lidar final BA] Skipped "
+                << skipped_missing_normals
+                << " LiDAR constraints without normals because point-to-plane"
+                   " mode is enforced.";
+    }
     if (mapper_options.use_risk_stratified_prior_weights_in_final_joint_ba) {
       LOG(INFO) << "[6DoF+Lidar final BA] Strengthened prior weights for "
                 << num_medium_risk_priors << " medium-risk and "
@@ -1233,12 +1254,96 @@ bool SixDofPriorGlobalMapper::RunLidarPointToPlaneRetriangulationAlignment(
     return false;
   }
 
+  if (!ApplyRobustMetricAlignmentIfEnabled(
+          mapper_options,
+          StringPrintf("retriangulation_%s_lidar_ba", stage_name).c_str())) {
+    return false;
+  }
+
   LOG(INFO) << "6DoF retriangulation LiDAR alignment finished at "
             << stage_name << " using phase " << lidar_phase << " with "
             << constraints.size()
             << " constraints and reprojection gate "
             << matching_options.max_reprojection_error << " px.";
   return true;
+}
+
+bool SixDofPriorGlobalMapper::EstimateRobustMetricAlignmentTransform(
+    const PriorGlobalMapperOptions& mapper_options,
+    const char* stage_name,
+    Sim3d* metric_from_current,
+    std::string* alignment_source,
+  size_t* num_correspondences) {
+  THROW_CHECK_NOTNULL(metric_from_current);
+  THROW_CHECK_NOTNULL(alignment_source);
+  THROW_CHECK_NOTNULL(num_correspondences);
+
+  if (mapper_options.prefer_lidar_for_post_ba_metric_alignment &&
+      lidar_cloud_ != nullptr && !lidar_cloud_->Empty()) {
+    const auto& reconstruction = GetReconstruction();
+    const bool use_tight_phase = UseTightMetricAlignmentPhase(stage_name);
+    const int lidar_phase = use_tight_phase ? 2 : 1;
+
+    LidarMatchingOptions matching_options = lidar_matching_options_;
+    matching_options.max_reprojection_error =
+        mapper_options.lidar_retriangulation_max_reprojection_error;
+
+    LidarMatcher matcher(*lidar_cloud_, matching_options);
+    std::vector<LidarConstraint> constraints =
+        matcher.BuildConstraints(reconstruction, lidar_phase);
+    if (!use_tight_phase) {
+      const std::unordered_set<point3D_t> stable_point3D_ids =
+          CollectStableEarlyLidarAnchorPointIds(
+              reconstruction,
+              mapper_options.lidar_retriangulation_early_min_track_length,
+              mapper_options
+                  .lidar_retriangulation_early_max_mean_reprojection_error);
+      FilterLidarConstraintsToEligiblePointIds(&constraints, stable_point3D_ids);
+    }
+
+    std::vector<Eigen::Vector3d> src_points;
+    std::vector<Eigen::Vector3d> tgt_points;
+    src_points.reserve(constraints.size());
+    tgt_points.reserve(constraints.size());
+    for (const auto& constraint : constraints) {
+      if (!reconstruction.ExistsPoint3D(constraint.point3D_id)) {
+        continue;
+      }
+      src_points.push_back(reconstruction.Point3D(constraint.point3D_id).xyz);
+      tgt_points.push_back(constraint.xyz_lidar);
+    }
+
+    *num_correspondences = src_points.size();
+    if (*num_correspondences >= static_cast<size_t>(std::max(
+                                   3,
+                                   mapper_options
+                                       .post_ba_metric_alignment_min_correspondences))) {
+      RANSACOptions ransac_options =
+          mapper_options.pose_prior_ba.alignment_ransac_options;
+      ransac_options.max_error =
+          (lidar_phase == 1) ? matching_options.phase1_max_distance
+                             : matching_options.phase2_max_distance;
+      const auto report =
+          EstimateSim3dRobust(src_points, tgt_points, ransac_options, *metric_from_current);
+      const size_t min_required_inliers = static_cast<size_t>(std::max(
+          3,
+          mapper_options.post_ba_metric_alignment_min_correspondences));
+      if (report.success && report.support.num_inliers >= min_required_inliers) {
+        *alignment_source = StringPrintf("sparse_lidar_phase%d[%s]",
+                                         lidar_phase,
+                                         stage_name != nullptr ? stage_name : "unknown");
+        return true;
+      }
+      LOG(INFO) << "Skipping sparse-LiDAR post-BA metric alignment at "
+                << (stage_name != nullptr ? stage_name : "unknown")
+                << ": correspondences=" << *num_correspondences
+                << ", inliers=" << report.support.num_inliers
+                << ", required_inliers=" << min_required_inliers << ".";
+    }
+  }
+
+  return PriorGlobalMapper::EstimateRobustMetricAlignmentTransform(
+      mapper_options, stage_name, metric_from_current, alignment_source, num_correspondences);
 }
 
 bool SixDofPriorGlobalMapper::ApplyEarlyRetriangulationObservationCleanup(
@@ -1578,11 +1683,17 @@ bool SixDofPriorGlobalMapper::RunPostEnforcementCleanup(
   bool ok = false;
   if (use_6dof) {
     ok = RunSixDofBundleAdjustment(mapper_options.bundle_adjustment,
+                                   mapper_options,
+                                   "post_enforcement_cleanup_6dof_ba",
                                    prior_options,
                                    prior_rotation_fallback_stddev_rad);
   } else if (use_prior) {
     ok = RunPosePriorBundleAdjustment(mapper_options.bundle_adjustment,
                                       prior_options);
+    if (ok) {
+      ok = ApplyRobustMetricAlignmentIfEnabled(
+          mapper_options, "post_enforcement_cleanup_prior_ba");
+    }
   } else {
     ok = RunVisualBundleAdjustment(mapper_options.bundle_adjustment, recon);
   }
@@ -1638,6 +1749,8 @@ bool SixDofPriorGlobalMapper::ApplyPostEnforcementObservationResidualFilter(
 
 bool SixDofPriorGlobalMapper::RunSixDofBundleAdjustment(
     const BundleAdjustmentOptions& ba_options,
+  const PriorGlobalMapperOptions& mapper_options,
+  const char* stage_name,
     const PosePriorBundleAdjustmentOptions& prior_options,
     double prior_rotation_fallback_stddev_rad) {
   auto& recon = GetReconstruction();
@@ -1670,11 +1783,15 @@ bool SixDofPriorGlobalMapper::RunSixDofBundleAdjustment(
                   "degenerate configuration). Halting.";
     return false;
   }
+  if (!ApplyRobustMetricAlignmentIfEnabled(mapper_options, stage_name)) {
+    return false;
+  }
   return true;
 }
 
 bool SixDofPriorGlobalMapper::IterativeSixDofBundleAdjustment(
     const BundleAdjustmentOptions& options,
+    const PriorGlobalMapperOptions& mapper_options,
     const PosePriorBundleAdjustmentOptions& prior_options,
     double prior_rotation_fallback_stddev_rad,
     double max_normalized_reproj_error,
@@ -1689,6 +1806,9 @@ bool SixDofPriorGlobalMapper::IterativeSixDofBundleAdjustment(
       opts_position_only.constant_rig_from_world_rotation = true;
       if (!RunSixDofBundleAdjustment(
               opts_position_only,
+            mapper_options,
+            StringPrintf("iterative_6dof_ba_%d_fixed_rotation", ite + 1)
+              .c_str(),
               prior_options,
               prior_rotation_fallback_stddev_rad)) {
         return false;
@@ -1699,7 +1819,11 @@ bool SixDofPriorGlobalMapper::IterativeSixDofBundleAdjustment(
 
     if (!skip_joint_optimization_stage) {
       if (!RunSixDofBundleAdjustment(
-              options, prior_options, prior_rotation_fallback_stddev_rad)) {
+              options,
+              mapper_options,
+              StringPrintf("iterative_6dof_ba_%d_joint", ite + 1).c_str(),
+              prior_options,
+              prior_rotation_fallback_stddev_rad)) {
         return false;
       }
     }
@@ -1804,6 +1928,10 @@ bool SixDofPriorGlobalMapper::IterativeRetriangulateAndRefineWithSixDofPriors(
               << refinement_idx + 1 << " / " << kMaxNumRefinements
               << " running 6DoF BA.";
     if (!RunSixDofBundleAdjustment(custom_ba_options,
+                                   mapper_options,
+                                   StringPrintf("retriangulation_refinement_%d_6dof_ba",
+                                                refinement_idx + 1)
+                                       .c_str(),
                                    prior_options,
                                    prior_rotation_fallback_stddev_rad)) {
       LOG(ERROR) << "6DoF retriangulation: 6DoF BA failed in refinement "
@@ -1861,7 +1989,11 @@ bool SixDofPriorGlobalMapper::IterativeRetriangulateAndRefineWithSixDofPriors(
 
         LOG(INFO) << "6DoF retriangulation: running final 6DoF BA.";
   if (!RunSixDofBundleAdjustment(
-          ba_options, prior_options, prior_rotation_fallback_stddev_rad)) {
+            ba_options,
+            mapper_options,
+            "retriangulation_final_6dof_ba",
+            prior_options,
+            prior_rotation_fallback_stddev_rad)) {
     return false;
   }
   if (!RunLidarPointToPlaneRetriangulationAlignment(
@@ -2228,6 +2360,7 @@ bool SixDofPriorGlobalMapper::Solve(
     bool ok;
     if (use_6dof) {
       ok = IterativeSixDofBundleAdjustment(opts.bundle_adjustment,
+                                           opts,
                                            prior_ba_opts,
                                            prior_rotation_fallback_stddev_rad,
                                            opts.max_normalized_reproj_error,
@@ -2237,6 +2370,7 @@ bool SixDofPriorGlobalMapper::Solve(
                                            opts.ba_skip_joint_optimization_stage);
     } else if (use_prior) {
       ok = IterativePriorBundleAdjustment(opts.bundle_adjustment,
+                                          opts,
                                           prior_ba_opts,
                                           opts.max_normalized_reproj_error,
                                           opts.min_tri_angle_deg,

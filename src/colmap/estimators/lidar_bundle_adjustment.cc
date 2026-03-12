@@ -37,7 +37,6 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
-#include <mutex>
 #include <numeric>
 #include <vector>
 
@@ -62,20 +61,23 @@ std::vector<LidarConstraint> LidarMatcher::BuildConstraints(
   THROW_CHECK_GE(phase, 1);
   THROW_CHECK_LE(phase, 2);
 
-  const double max_dist =
+  const double max_plane_dist =
       (phase == 1) ? options_.phase1_max_distance : options_.phase2_max_distance;
-  const double max_sq_dist = max_dist * max_dist;
+  const double max_euclidean_sq_dist =
+      options_.max_euclidean_distance * options_.max_euclidean_distance;
 
   if (cloud_.Empty()) return {};
 
   // -------------------------------------------------------------------------
-  // Phase 1: raw KNN search over all Point3Ds.
-  // Phase 2: same search but with tighter threshold.
+  // Match each sparse point to its single nearest LiDAR neighbour, then
+  // filter with a global Euclidean gate followed by a phase-specific
+  // point-to-plane gate.
   // -------------------------------------------------------------------------
   struct RawMatch {
     point3D_t point3D_id;
     size_t lidar_idx;
     double sq_dist;
+    double point_to_plane_abs_dist;
   };
   std::vector<RawMatch> raw_matches;
   raw_matches.reserve(reconstruction.NumPoints3D());
@@ -107,6 +109,7 @@ std::vector<LidarConstraint> LidarMatcher::BuildConstraints(
   std::atomic<int> skipped_track{0};
   std::atomic<int> skipped_repr{0};
   std::atomic<int> skipped_dist{0};
+  std::atomic<int> skipped_plane_dist{0};
 
   // Thread-local storage for partial results.
   const int n_threads =
@@ -136,18 +139,22 @@ std::vector<LidarConstraint> LidarMatcher::BuildConstraints(
       continue;
     }
 
-    const auto candidates =
-        cloud_.KNearestNeighbors(pe.xyz, options_.k_candidates);
+    const auto nearest = cloud_.NearestNeighbor(pe.xyz);
+    if (nearest.sq_dist > max_euclidean_sq_dist) {
+      ++skipped_dist;
+      continue;
+    }
 
-    double best_sq = std::numeric_limits<double>::max();
-    size_t best_idx = 0;
-    for (const auto& c : candidates) {
-      if (c.sq_dist < best_sq && c.sq_dist <= max_sq_dist) {
-        best_sq = c.sq_dist;
-        best_idx = c.index;
+    const LidarPoint& matched_lidar_point = cloud_.Point(nearest.index);
+    double point_to_plane_abs_dist = 0.0;
+    if (matched_lidar_point.HasNormal()) {
+      point_to_plane_abs_dist = std::abs(
+          matched_lidar_point.normal.dot(pe.xyz - matched_lidar_point.xyz));
+      if (point_to_plane_abs_dist > max_plane_dist) {
+        ++skipped_plane_dist;
+        continue;
       }
     }
-    if (best_sq > max_sq_dist) { ++skipped_dist; continue; }
 
     const int tid =
 #ifdef _OPENMP
@@ -156,7 +163,7 @@ std::vector<LidarConstraint> LidarMatcher::BuildConstraints(
         0;
 #endif
     thread_matches[static_cast<size_t>(tid)].push_back(
-        {pe.id, best_idx, best_sq});
+  {pe.id, nearest.index, nearest.sq_dist, point_to_plane_abs_dist});
   }
 
   // Merge thread-local results.
@@ -167,8 +174,12 @@ std::vector<LidarConstraint> LidarMatcher::BuildConstraints(
   LOG(INFO) << "[LidarMatcher] Phase " << phase
             << " quality pre-filter: skipped_track_length=" << skipped_track.load()
             << " skipped_reprojection_error=" << skipped_repr.load()
-            << " skipped_no_lidar_coverage=" << skipped_dist.load()
-            << " candidates_passed=" << raw_matches.size();
+            << " skipped_euclidean_distance=" << skipped_dist.load()
+            << " skipped_point_to_plane_distance="
+            << skipped_plane_dist.load()
+            << " candidates_passed=" << raw_matches.size()
+            << " euclidean_gate_m=" << options_.max_euclidean_distance
+            << " point_to_plane_gate_m=" << max_plane_dist;
 
   if (raw_matches.empty()) return {};
 
@@ -201,15 +212,60 @@ std::vector<LidarConstraint> LidarMatcher::BuildConstraints(
     raw_matches = std::move(filtered);
   }
 
+  if (options_.keep_only_closest_match_per_lidar_point &&
+      raw_matches.size() > 1) {
+    std::sort(raw_matches.begin(),
+              raw_matches.end(),
+              [](const RawMatch& lhs, const RawMatch& rhs) {
+                if (lhs.lidar_idx != rhs.lidar_idx) {
+                  return lhs.lidar_idx < rhs.lidar_idx;
+                }
+                if (lhs.sq_dist != rhs.sq_dist) {
+                  return lhs.sq_dist < rhs.sq_dist;
+                }
+                if (lhs.point_to_plane_abs_dist != rhs.point_to_plane_abs_dist) {
+                  return lhs.point_to_plane_abs_dist <
+                         rhs.point_to_plane_abs_dist;
+                }
+                return lhs.point3D_id < rhs.point3D_id;
+              });
+
+    std::vector<RawMatch> unique_matches;
+    unique_matches.reserve(raw_matches.size());
+    size_t duplicate_matches = 0;
+    for (const auto& match : raw_matches) {
+      if (!unique_matches.empty() &&
+          unique_matches.back().lidar_idx == match.lidar_idx) {
+        ++duplicate_matches;
+        continue;
+      }
+      unique_matches.push_back(match);
+    }
+
+    if (duplicate_matches > 0) {
+      LOG(INFO) << "[LidarMatcher] Phase " << phase
+                << ": removed " << duplicate_matches
+                << " duplicate sparse-to-LiDAR matches so that each LiDAR "
+                   "point contributes at most one correspondence.";
+    }
+    raw_matches = std::move(unique_matches);
+  }
+
   // -------------------------------------------------------------------------
   // Build final LidarConstraint objects.
   // Phase 2: apply optional normal alignment filter.
   // -------------------------------------------------------------------------
   std::vector<LidarConstraint> constraints;
   constraints.reserve(raw_matches.size());
+  size_t skipped_missing_normals = 0;
 
   for (const auto& m : raw_matches) {
     const LidarPoint& lp = cloud_.Point(m.lidar_idx);
+
+    if (options_.require_lidar_normals && !lp.HasNormal()) {
+      ++skipped_missing_normals;
+      continue;
+    }
 
     // Phase 2 normal alignment check.
     if (phase == 2 && options_.phase2_max_normal_alignment > 0.0 &&
@@ -223,9 +279,15 @@ std::vector<LidarConstraint> LidarMatcher::BuildConstraints(
     c.xyz_lidar  = lp.xyz;
     c.normal     = lp.normal;
     c.sq_dist    = m.sq_dist;
-    c.use_plane  = lp.HasNormal();
+    c.use_plane  = options_.require_lidar_normals || lp.HasNormal();
 
     constraints.push_back(c);
+  }
+
+  if (skipped_missing_normals > 0) {
+    LOG(INFO) << "[LidarMatcher] Phase " << phase << ": skipped "
+              << skipped_missing_normals
+              << " matches because the LiDAR point had no usable normal.";
   }
 
   LOG(INFO) << "[LidarMatcher] Phase " << phase
@@ -321,6 +383,7 @@ class LidarBundleAdjusterImpl : public BundleAdjuster {
     // 3. Add LiDAR residuals for every constraint whose point3D is a variable
     //    parameter block in the problem.
     int added = 0;
+    int skipped_missing_normals = 0;
     for (const auto& c : constraints) {
       if (!reconstruction.ExistsPoint3D(c.point3D_id)) continue;
       Point3D& point3D = reconstruction.Point3D(c.point3D_id);
@@ -332,7 +395,11 @@ class LidarBundleAdjusterImpl : public BundleAdjuster {
       if (problem->IsParameterBlockConstant(xyz)) continue;
 
       ceres::CostFunction* cost = nullptr;
-      if (c.use_plane && lidar_options.use_point_to_plane) {
+      if (lidar_options.use_point_to_plane) {
+        if (!c.use_plane) {
+          ++skipped_missing_normals;
+          continue;
+        }
         cost = PointToPlaneCostFunctor::Create(c.xyz_lidar, c.normal);
       } else {
         cost = PointToPointCostFunctor::Create(c.xyz_lidar);
@@ -345,6 +412,11 @@ class LidarBundleAdjusterImpl : public BundleAdjuster {
     LOG(INFO) << "[LidarBA] Added " << added
               << " LiDAR residuals (weight=" << lidar_options.weight
               << ", constraints=" << constraints.size() << ").";
+    if (skipped_missing_normals > 0) {
+      LOG(INFO) << "[LidarBA] Skipped " << skipped_missing_normals
+                << " LiDAR constraints without normals because point-to-plane"
+                   " mode is enforced.";
+    }
   }
 
   std::shared_ptr<BundleAdjustmentSummary> Solve() override {

@@ -790,6 +790,14 @@ void OptionManager::AddGlobalMapperOptions() {
                    &global_mapper->mapper.max_6dof_rotation_prior_deviation_deg);
   AddDefaultOption("GlobalMapper.use_6dof_retriangulation_refinement",
                    &global_mapper->mapper.use_6dof_retriangulation_refinement);
+    AddDefaultOption("GlobalMapper.use_post_ba_metric_alignment",
+            &global_mapper->mapper.use_post_ba_metric_alignment);
+    AddDefaultOption("GlobalMapper.prefer_lidar_for_post_ba_metric_alignment",
+            &global_mapper->mapper
+              .prefer_lidar_for_post_ba_metric_alignment);
+    AddDefaultOption("GlobalMapper.post_ba_metric_alignment_min_correspondences",
+            &global_mapper->mapper
+              .post_ba_metric_alignment_min_correspondences);
   AddDefaultOption("GlobalMapper.log_6dof_retriangulation_debug_snapshots",
                    &global_mapper->mapper
                         .log_6dof_retriangulation_debug_snapshots);
@@ -887,17 +895,16 @@ void OptionManager::AddGlobalMapperOptions() {
         &global_mapper->mapper
            .use_lidar_point_to_plane_only_in_final_retriangulation);
 
-  // Two-phase KNN matching thresholds (in metres).
-  // Phase 1 = early iterations before poses are stable (loose).
-  // Phase 2 = tight matching once GPS BA has stabilised poses.
+  // LiDAR nearest-neighbour gating thresholds (in metres).
+  // First apply the shared Euclidean gate, then the phase-specific
+  // point-to-plane gate.
+  AddDefaultOption(
+      "GlobalMapper.lidar_max_euclidean_distance",
+      &global_mapper->mapper.lidar_matching.max_euclidean_distance);
   AddDefaultOption("GlobalMapper.lidar_phase1_max_distance",
                    &global_mapper->mapper.lidar_matching.phase1_max_distance);
   AddDefaultOption("GlobalMapper.lidar_phase2_max_distance",
                    &global_mapper->mapper.lidar_matching.phase2_max_distance);
-
-  // Number of KNN candidates per Point3D before selecting the closest match.
-  AddDefaultOption("GlobalMapper.lidar_knn_candidates",
-                   &global_mapper->mapper.lidar_matching.k_candidates);
 
   // Statistical outlier rejection: reject matches with dist > mean + k*sigma.
   AddDefaultOption("GlobalMapper.lidar_stat_sigma",

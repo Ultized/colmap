@@ -58,9 +58,9 @@ struct LidarBundleAdjustmentOptions {
   // matches cannot overpower reprojection constraints.
   double weight = 0.1;
 
-  // Whether to prefer point-to-plane over point-to-point.
-  // Falls back to point-to-point automatically when the matched LiDAR point
-  // has a zero normal.
+  // Whether to use point-to-plane constraints.
+  // When enabled, constraints that do not have a valid LiDAR normal are
+  // skipped rather than falling back to point-to-point.
   bool use_point_to_plane = true;
 };
 
@@ -70,13 +70,19 @@ struct LidarBundleAdjustmentOptions {
 // Controls the two-phase KNN matching strategy.
 // ---------------------------------------------------------------------------
 struct LidarMatchingOptions {
+  // Maximum Euclidean distance (metres) allowed when selecting the nearest
+  // LiDAR neighbour for a sparse 3D point. Correspondences outside this
+  // range are rejected before any point-to-plane filtering.
+  double max_euclidean_distance = 2.0;
+
   // --- Phase 1 (early BA iterations) ---
-  // Loose distance gate: accept any match closer than this (metres).
+  // Point-to-plane distance gate (metres) applied after the Euclidean
+  // nearest-neighbour correspondence has been chosen.
   double phase1_max_distance = 0.50;
 
   // --- Phase 2 (after GPS-stabilised BA) ---
-  // Tight distance gate.
-  double phase2_max_distance = 0.10;
+  // Point-to-plane distance gate (metres) for the tighter final phase.
+  double phase2_max_distance = 0.20;
 
   // Minimum normal alignment required in phase 2.
   // |dot(sfm_view_mean, lidar_normal)| must be below this value.
@@ -88,8 +94,16 @@ struct LidarMatchingOptions {
   // Applied in both phases.
   double stat_sigma = 3.0;
 
-  // Number of KNN candidates to evaluate per point before picking the best.
-  int k_candidates = 5;
+  // When enabled, only LiDAR points with valid normals are allowed to create
+  // SfM constraints. This keeps the LiDAR structural alignment strictly in
+  // point-to-plane mode when planar LiDAR points are provided.
+  bool require_lidar_normals = true;
+
+  // If true, keep at most one sparse Point3D match per LiDAR point by
+  // retaining only the closest candidate. This reduces the bias from many
+  // nearby sparse points collapsing onto the same LiDAR sample when the two
+  // structures are not in exact one-to-one correspondence.
+  bool keep_only_closest_match_per_lidar_point = true;
 
   // Minimum number of camera observations (track length) a Point3D must have
   // before being eligible as a LiDAR anchor.  Points observed by fewer

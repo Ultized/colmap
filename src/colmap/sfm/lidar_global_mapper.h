@@ -49,7 +49,8 @@ namespace colmap {
 struct LidarGlobalMapperOptions : public PriorGlobalMapperOptions {
   // -----------------------------------------------------------------------
   // LiDAR KNN matching options (two-phase).
-  // Phase 1 = early iterations (loose 0.5 m), Phase 2 = tight (0.1 m).
+  // Phase 1 = early iterations (point-to-plane gate 0.5 m),
+  // Phase 2 = tighter final gate (0.2 m by default).
   // -----------------------------------------------------------------------
   LidarMatchingOptions lidar_matching;
 

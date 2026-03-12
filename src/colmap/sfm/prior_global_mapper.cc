@@ -29,6 +29,7 @@
 
 #include "colmap/sfm/prior_global_mapper.h"
 
+#include "colmap/estimators/alignment.h"
 #include "colmap/estimators/bundle_adjustment.h"
 #include "colmap/estimators/bundle_adjustment_ceres.h"
 #include "colmap/estimators/global_positioning.h"
@@ -72,6 +73,28 @@ PriorGlobalMapperOptions InitializePriorOptions(
     opts.bundle_adjustment.ceres->solver_options.num_threads = opts.num_threads;
   }
   return opts;
+}
+
+size_t CountPosePriorCorrespondences(
+    const Reconstruction& reconstruction,
+    const std::vector<PosePrior>& pose_priors) {
+  size_t num_correspondences = 0;
+  for (const auto& pose_prior : pose_priors) {
+    if (!pose_prior.HasPosition() ||
+        pose_prior.corr_data_id.sensor_id.type != SensorType::CAMERA) {
+      continue;
+    }
+    const image_t image_id = static_cast<image_t>(pose_prior.corr_data_id.id);
+    if (!reconstruction.ExistsImage(image_id)) {
+      continue;
+    }
+    const Image& image = reconstruction.Image(image_id);
+    if (!image.HasPose()) {
+      continue;
+    }
+    ++num_correspondences;
+  }
+  return num_correspondences;
 }
 
 }  // namespace
@@ -322,8 +345,80 @@ bool PriorGlobalMapper::RunPosePriorBundleAdjustment(
   return ba->Solve()->IsSolutionUsable();
 }
 
+bool PriorGlobalMapper::ApplyRobustMetricAlignmentIfEnabled(
+    const PriorGlobalMapperOptions& mapper_options,
+    const char* stage_name) {
+  if (!mapper_options.use_post_ba_metric_alignment) {
+    return true;
+  }
+
+  auto& reconstruction = GetReconstruction();
+  if (reconstruction.NumRegImages() == 0 || reconstruction.NumPoints3D() == 0) {
+    LOG(INFO) << "Skipping post-BA metric alignment at " << stage_name
+              << ": reconstruction has no registered images or 3D points.";
+    return true;
+  }
+
+  Sim3d metric_from_current;
+  std::string alignment_source = "none";
+  size_t num_correspondences = 0;
+  if (!EstimateRobustMetricAlignmentTransform(mapper_options,
+                                              stage_name,
+                                              &metric_from_current,
+                                              &alignment_source,
+                                              &num_correspondences)) {
+    LOG(INFO) << "Skipping post-BA metric alignment at " << stage_name
+              << ": no robust Sim3 estimate available.";
+    return true;
+  }
+
+  if (!metric_from_current.params.allFinite() || metric_from_current.scale() <= 0.0) {
+    LOG(WARNING) << "Skipping post-BA metric alignment at " << stage_name
+                 << ": estimated Sim3 is invalid.";
+    return true;
+  }
+
+  reconstruction.Transform(metric_from_current);
+  LOG(INFO) << "Applied post-BA metric Sim3 alignment at " << stage_name
+            << " using " << alignment_source << " (correspondences="
+            << num_correspondences << ", scale=" << metric_from_current.scale()
+            << ", translation_norm="
+            << metric_from_current.translation().norm() << ").";
+  return true;
+}
+
+bool PriorGlobalMapper::EstimateRobustMetricAlignmentTransform(
+    const PriorGlobalMapperOptions& mapper_options,
+    const char* stage_name,
+    Sim3d* metric_from_current,
+    std::string* alignment_source,
+  size_t* num_correspondences) {
+  THROW_CHECK_NOTNULL(metric_from_current);
+  THROW_CHECK_NOTNULL(alignment_source);
+  THROW_CHECK_NOTNULL(num_correspondences);
+
+  const auto& reconstruction = GetReconstruction();
+  const auto& pose_priors = database_cache_->PosePriors();
+  *num_correspondences = CountPosePriorCorrespondences(reconstruction, pose_priors);
+  if (*num_correspondences < static_cast<size_t>(std::max(
+                                3,
+                                mapper_options.post_ba_metric_alignment_min_correspondences))) {
+    return false;
+  }
+
+  RANSACOptions ransac_options = mapper_options.pose_prior_ba.alignment_ransac_options;
+  if (!AlignReconstructionToPosePriors(
+          reconstruction, pose_priors, ransac_options, metric_from_current)) {
+    return false;
+  }
+
+  *alignment_source = StringPrintf("pose_priors[%s]", stage_name);
+  return true;
+}
+
 bool PriorGlobalMapper::IterativePriorBundleAdjustment(
     const BundleAdjustmentOptions& options,
+    const PriorGlobalMapperOptions& mapper_options,
     const PosePriorBundleAdjustmentOptions& prior_options,
     double max_normalized_reproj_error,
     double min_tri_angle_deg,
@@ -339,6 +434,12 @@ bool PriorGlobalMapper::IterativePriorBundleAdjustment(
       if (!RunPosePriorBundleAdjustment(opts_position_only, prior_options)) {
         return false;
       }
+      if (!ApplyRobustMetricAlignmentIfEnabled(
+              mapper_options,
+              StringPrintf("iterative_prior_ba_%d_fixed_rotation", ite + 1)
+                  .c_str())) {
+        return false;
+      }
       LOG(INFO) << "Prior BA iteration " << ite + 1 << " / " << num_iterations
                 << ", fixed-rotation stage finished";
     }
@@ -346,6 +447,11 @@ bool PriorGlobalMapper::IterativePriorBundleAdjustment(
     // --- Joint optimisation stage ----------------------------------------
     if (!skip_joint_optimization_stage) {
       if (!RunPosePriorBundleAdjustment(options, prior_options)) {
+        return false;
+      }
+      if (!ApplyRobustMetricAlignmentIfEnabled(
+              mapper_options,
+              StringPrintf("iterative_prior_ba_%d_joint", ite + 1).c_str())) {
         return false;
       }
     }
@@ -452,6 +558,10 @@ bool PriorGlobalMapper::IterativePriorRetriangulateAndRefine(
 
   // Final BA with GPS prior constraints.
   if (!RunPosePriorBundleAdjustment(ba_options, mapper_options.pose_prior_ba)) {
+    return false;
+  }
+  if (!ApplyRobustMetricAlignmentIfEnabled(
+          mapper_options, "prior_retriangulation_final_ba")) {
     return false;
   }
 
@@ -579,6 +689,7 @@ bool PriorGlobalMapper::Solve(const PriorGlobalMapperOptions& options,
     bool ok;
     if (use_prior) {
       ok = IterativePriorBundleAdjustment(opts.bundle_adjustment,
+                  opts,
                                           prior_ba_opts,
                                           opts.max_normalized_reproj_error,
                                           opts.min_tri_angle_deg,

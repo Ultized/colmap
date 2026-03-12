@@ -30,7 +30,6 @@
 #include "colmap/scene/lidar_point_cloud.h"
 
 #include "colmap/util/logging.h"
-#include "colmap/util/misc.h"
 #include "colmap/util/ply.h"
 
 #include <fstream>
@@ -38,6 +37,23 @@
 #include <filesystem>
 
 namespace colmap {
+
+namespace {
+
+Eigen::Vector3d NormalizeOrZero(const Eigen::Vector3d& normal) {
+  if (!normal.allFinite()) {
+    return Eigen::Vector3d::Zero();
+  }
+
+  const double norm = normal.norm();
+  if (norm <= 1e-12) {
+    return Eigen::Vector3d::Zero();
+  }
+
+  return normal / norm;
+}
+
+}  // namespace
 
 std::shared_ptr<LidarPointCloud> LoadLidarPointCloud(
     const std::filesystem::path& path) {
@@ -59,8 +75,8 @@ std::shared_ptr<LidarPointCloud> LoadLidarPointCloud(
     points.reserve(ply_points.size());
     for (const auto& p : ply_points) {
       LidarPoint lp;
-      lp.xyz    = Eigen::Vector3d(p.x, p.y, p.z);
-      lp.normal = Eigen::Vector3d(p.nx, p.ny, p.nz);
+      lp.xyz = Eigen::Vector3d(p.x, p.y, p.z);
+      lp.normal = NormalizeOrZero(Eigen::Vector3d(p.nx, p.ny, p.nz));
       points.push_back(lp);
     }
   } else {
@@ -88,19 +104,29 @@ std::shared_ptr<LidarPointCloud> LoadLidarPointCloud(
 
       LidarPoint lp;
       lp.xyz = Eigen::Vector3d(x, y, z);
+      lp.normal = Eigen::Vector3d::Zero();
 
       double nx, ny, nz;
       if (ss >> nx >> ny >> nz) {
-        lp.normal = Eigen::Vector3d(nx, ny, nz);
+        lp.normal = NormalizeOrZero(Eigen::Vector3d(nx, ny, nz));
       }
 
       points.push_back(lp);
     }
   }
 
-  LOG(INFO) << "LoadLidarPointCloud: loaded " << points.size()
-            << " points from " << path;
   THROW_CHECK(!points.empty()) << "LiDAR file is empty: " << path;
+
+  size_t num_points_with_normals = 0;
+  for (const auto& point : points) {
+    if (point.HasNormal()) {
+      ++num_points_with_normals;
+    }
+  }
+
+  LOG(INFO) << "LoadLidarPointCloud: loaded " << points.size()
+            << " points from " << path << " (with_normals="
+            << num_points_with_normals << ")";
 
   return std::make_shared<LidarPointCloud>(std::move(points));
 }

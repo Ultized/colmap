@@ -83,6 +83,22 @@ struct PriorGlobalMapperOptions : public GlobalMapperOptions {
     // priors stay on the metric BA path end-to-end unless explicitly disabled.
     bool use_6dof_retriangulation_refinement = true;
 
+    // If true, estimate a robust global Sim3 after each major BA stage and
+    // apply it directly to the whole reconstruction before the next stage.
+    // This is intended to absorb low-frequency metric drift against LiDAR or
+    // pose priors without locally deforming a visually self-consistent model.
+    bool use_post_ba_metric_alignment = true;
+
+    // Prefer sparse-LiDAR correspondences over pose-prior centers when
+    // estimating the post-BA metric Sim3. If LiDAR alignment cannot be
+    // estimated robustly, pose-prior alignment is used as a fallback.
+    bool prefer_lidar_for_post_ba_metric_alignment = true;
+
+    // Minimum number of correspondences required before attempting the post-BA
+    // metric Sim3 estimation. Lower values make the alignment more eager but
+    // also less stable. Must be >= 3 to be usable.
+    int post_ba_metric_alignment_min_correspondences = 20;
+
     // If true, keep a LiDAR structural alignment step active throughout the
     // 6DoF retriangulation refinement stage. This requires a non-empty
     // GlobalMapper.lidar_point_cloud_path and only affects the 6DoF mapper
@@ -298,6 +314,17 @@ class PriorGlobalMapper : public GlobalMapper {
       const BundleAdjustmentOptions& ba_options,
       const PosePriorBundleAdjustmentOptions& prior_options);
 
+    bool ApplyRobustMetricAlignmentIfEnabled(
+      const PriorGlobalMapperOptions& mapper_options,
+      const char* stage_name);
+
+    virtual bool EstimateRobustMetricAlignmentTransform(
+      const PriorGlobalMapperOptions& mapper_options,
+      const char* stage_name,
+      Sim3d* metric_from_current,
+      std::string* alignment_source,
+        size_t* num_correspondences);
+
   // -----------------------------------------------------------------------
   // Step 4 – GPS-aware iterative bundle adjustment.
   // Mirrors GlobalMapper::IterativeBundleAdjustment() but:
@@ -306,6 +333,7 @@ class PriorGlobalMapper : public GlobalMapper {
   // -----------------------------------------------------------------------
   bool IterativePriorBundleAdjustment(
       const BundleAdjustmentOptions& options,
+      const PriorGlobalMapperOptions& mapper_options,
       const PosePriorBundleAdjustmentOptions& prior_options,
       double max_normalized_reproj_error,
       double min_tri_angle_deg,

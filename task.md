@@ -8,16 +8,27 @@
 - 对最终解算结果与 `sparse_lidar` 做对比，验证 6DoF 约束是否有效提升重建稳定性和精度
 - 添加 激光的点到平面约束，在retriangle 环节，同时设置参数，只有当重投影误差小于 `3 px` 时才进行稀疏点到激光点的约束，开启后就不会进行关闭，然后这个阈值可以通过cli 修改。
 
+- 前期由 6DoF 位姿和激光提供鲁棒性约束，中期优先保证视觉内部一致性，后期在不破坏视觉一致性的前提下，优先做整体 metric / Sim3 对齐；如果存在可靠激光对应，再尽可能整体贴齐激光，而不是逐点或逐帧硬拉局部结构。
+
 补充原则：
 - 优先保证视觉内部一致性，6DoF 位姿先验和激光先验的角色是增强困难场景下的鲁棒性，而不是替代视觉几何本身
 - 因此推荐配置应优先选择“不破坏视觉重建自洽性”的方案，而不是单纯追求更贴近 prior 的数值结果
 
 ## 验收标准
-- 平均相机 center 误差小于 `0.2 m`
-- 最大相机 center 误差小于 `0.5 m`
-- 重投影误差小于 `3 px`
-- `mean_reprojection_error == 0` 视为解算失败
-- 不允许出现 `zero-observation image`
+- 先看是否成功重建：必须有有效注册图像、有效 `points3D`，且 `mean_reprojection_error != 0`
+- 再看视觉内部一致性：重投影误差稳定、`zero-observation image = 0`、不要靠后处理硬拉几何
+- 再看稀疏点和 LiDAR 的贴合程度：只统计视觉上相对稳定、并且能在 LiDAR 中找到近邻的稀疏点子集
+- 最后才看相机 center 和旋转误差：它们只作为次级参考，不再作为“越小越好”的第一优化目标
+
+对应评估脚本：
+- `python\util\evaluate_reconstruction_result.py`
+	- 输入稀疏模型、LiDAR 点云、可选参考模型
+	- 评估顺序固定为：重建成功 -> 视觉内部一致性 -> sparse-LiDAR 对齐 -> 相机位姿偏差
+	- sparse-LiDAR 新增主指标：
+		- `sparse_to_lidar_alignable_ratio`
+		- `sparse_to_lidar_alignable_mean_distance_m`
+		- `sparse_to_lidar_p95_nn_distance_m`
+	- 其中 LiDAR 对齐只评估满足 `min_track_length` 和 `max_point_reprojection_error` 的稳定稀疏点，避免把本来就不该参与贴齐的点混进统计
 
 # 测试数据
 
@@ -61,6 +72,11 @@
 - 已支持在 6DoF retriangulation refinement 中引入 LiDAR 点到平面约束
 - 已支持 `GlobalMapper.lidar_retriangulation_max_reprojection_error`
 	- 仅当稀疏点重投影误差不超过阈值时，才参与 LiDAR 约束
+- 已支持在主要 BA 阶段后执行低风险的 robust Sim3 整体对齐，默认开启
+	- 优先使用当前稳定的 sparse-LiDAR 对应估计整体 Sim3
+	- 若 LiDAR 对应不足或估计不稳，则自动回退到 pose prior center 的 robust Sim3
+	- 目标是吸收整体 metric drift，而不是通过局部硬约束破坏视觉内部几何
+	- LiDAR 对应默认不再假设与视觉稀疏点一一对应；匹配时按 LiDAR 点去重，只保留每个 LiDAR 点最近的 sparse 对应，再由 robust Sim3 只吸收一致子集
 - 已支持“早期但保守”的 LiDAR 稳定性门控与早期清理：
 	- `GlobalMapper.lidar_retriangulation_early_min_track_length`
 	- `GlobalMapper.lidar_retriangulation_early_max_mean_reprojection_error`
@@ -164,6 +180,15 @@ $env:PATH='C:\Program Files\NVIDIA cuDSS\v0.7\bin\12;D:\Code\Cpp\colmap\build\_d
 - `mean_reprojection_error_px: 0.895035`
 - `mean_observations_per_image: 314.492004`
 - `zero_observation_images: 0`
+- `stable_sparse_points_for_lidar_eval: 32214`
+- `sparse_to_lidar_mean_nn_distance_m: 0.036143`
+- `sparse_to_lidar_p95_nn_distance_m: 0.094940`
+- `sparse_to_lidar_alignable_ratio: 0.952257`
+- `sparse_to_lidar_alignable_mean_distance_m: 0.016934`
+- `sparse_to_lidar_alignable_p95_distance_m: 0.047467`
+- `sparse_to_lidar_ratio_within_20mm: 0.759049`
+- `sparse_to_lidar_ratio_within_50mm: 0.908518`
+- `sparse_to_lidar_ratio_within_100mm: 0.952257`
 - `common_images: 1061`
 - `mean_center_error_m: 0.012495`
 - `median_center_error_m: 0.011186`
@@ -213,6 +238,59 @@ $env:PATH='C:\Program Files\NVIDIA cuDSS\v0.7\bin\12;D:\Code\Cpp\colmap\build\_d
 	- 多线程确实能提速
 	- 但 `num_threads=8` 会把结果带到另一条略差的解上，不满足“速度提升且不降低指标”
 	- 因此当前最优方案仍然是上面的 `early_gate_cleanup_v2 + num_threads=1`
+
+### 最新 post-BA Sim3 + stronger LiDAR 验证结论
+- 已在 `20_qiantai_num_1` 上完成低风险版本验证：
+	- 结果目录：`results/global_mapper_6dof_auto_default_ba_lidar_retri_early_gate_cleanup_v2_sim3verify_q1/0`
+	- 默认开启 `GlobalMapper.use_post_ba_metric_alignment=1`
+	- 优先使用 sparse-LiDAR 对应做阶段后 robust Sim3，对应不足时回退 pose prior
+	- LiDAR 匹配默认按 LiDAR 点去重，不要求和视觉稀疏点一一对应
+	- 本轮验证额外显式加大 LiDAR 权重：`GlobalMapper.lidar_phase1_weight=0.1`、`GlobalMapper.lidar_phase2_weight=1.0`
+- 运行现象：
+	- 阶段后 Sim3 在 iterative BA 和 retriangulation 的每个主要 BA 阶段后都稳定触发
+	- iterative BA 阶段的 Sim3 缩放基本稳定在 `0.9994 ~ 0.9999`
+	- retriangulation 阶段 phase-1/phase-2 的 LiDAR 对应和 early gate 都能稳定建立，没有把流程跑挂
+- 最终重建统计：
+	- `registered_images: 1061`
+	- `points3D: 50856`
+	- `mean_reprojection_error_px: 0.893319`
+	- `mean_observations_per_image: 315.445806`
+- 在新的 sparse-LiDAR 对齐指标下：
+	- `stable_sparse_points_for_lidar_eval: 32276`
+	- `sparse_to_lidar_mean_nn_distance_m: 0.039203`
+	- `sparse_to_lidar_p95_nn_distance_m: 0.117829`
+	- `sparse_to_lidar_alignable_ratio: 0.940048`
+	- `sparse_to_lidar_alignable_mean_distance_m: 0.018165`
+	- `sparse_to_lidar_alignable_p95_distance_m: 0.052359`
+	- `sparse_to_lidar_ratio_within_20mm: 0.723696`
+	- `sparse_to_lidar_ratio_within_50mm: 0.889175`
+	- `sparse_to_lidar_ratio_within_100mm: 0.940048`
+- 相对 `sparse_lidar` 的位姿误差：
+	- `common_images: 1059`
+	- `mean_center_error_m: 0.031701`
+	- `median_center_error_m: 0.027459`
+	- `p95_center_error_m: 0.058264`
+	- `max_center_error_m: 0.193386`
+	- `mean_rotation_error_deg: 0.333219`
+	- `max_rotation_error_deg: 1.317373`
+- 与当前推荐配置相比：
+	- 重投影略好：`0.893319 < 0.895035`
+	- 但注册图像更少：`1061 < 1063`
+	- `points3D` 更少：`50856 < 50925`
+	- 在新的 LiDAR 贴合指标下也没有反超：
+		- `sparse_to_lidar_alignable_ratio` 更差：`0.940048 < 0.952257`
+		- `sparse_to_lidar_alignable_mean_distance_m` 更差：`0.018165 > 0.016934`
+		- `sparse_to_lidar_alignable_p95_distance_m` 更差：`0.052359 > 0.047467`
+		- `sparse_to_lidar_ratio_within_20mm` 更差：`0.723696 < 0.759049`
+	- 次级相机位姿指标也更差：
+		- `mean_center_error_m` 更差：`0.031701 > 0.012495`
+		- `max_center_error_m` 更差：`0.193386 > 0.081422`
+- 结论：
+	- 默认开启的阶段后 robust Sim3 整体对齐功能已经验证可用
+	- “LiDAR 与视觉稀疏不一一对应”这个问题已经按“只让能对齐的对应参与”处理
+	- 但在当前这组更强 LiDAR 权重下，并没有在“先重建成功、再视觉内部一致性、再 sparse-LiDAR 贴合”的新优先级下超越当前推荐配置
+	- 因此当前推荐配置暂不替换，仍保持 `early_gate_cleanup_v2`
+	- 若继续沿这个方向优化，下一步更值得调的是 post-BA Sim3 的触发强度和 LiDAR 权重分阶段调度，而不是继续整体加大 LiDAR 权重
 
 ### 默认值调整结论
 - 当前代码默认值已改为贴近 `early_gate_cleanup_v2` 的算法配置，包括：

@@ -52,11 +52,21 @@ class SixDofPriorGlobalMapper : public PriorGlobalMapper {
 
   bool RunSixDofBundleAdjustment(
       const BundleAdjustmentOptions& ba_options,
+      const PriorGlobalMapperOptions& mapper_options,
+      const char* stage_name,
       const PosePriorBundleAdjustmentOptions& prior_options,
       double prior_rotation_fallback_stddev_rad);
 
+  bool EstimateRobustMetricAlignmentTransform(
+      const PriorGlobalMapperOptions& mapper_options,
+      const char* stage_name,
+      Sim3d* metric_from_current,
+      std::string* alignment_source,
+      size_t* num_correspondences) override;
+
   bool IterativeSixDofBundleAdjustment(
       const BundleAdjustmentOptions& options,
+      const PriorGlobalMapperOptions& mapper_options,
       const PosePriorBundleAdjustmentOptions& prior_options,
       double prior_rotation_fallback_stddev_rad,
       double max_normalized_reproj_error,

@@ -101,11 +101,22 @@ void GlobalPipeline::Run() {
   mapper_options.image_path = options_.image_path;
   mapper_options.num_threads = options_.num_threads;
   mapper_options.random_seed = options_.random_seed;
+  if (mapper_options.lidar_ba.use_point_to_plane) {
+    mapper_options.lidar_matching.require_lidar_normals = true;
+  }
 
   // Optionally load LiDAR point cloud.
   std::shared_ptr<const LidarPointCloud> lidar_cloud;
   if (!options_.lidar_point_cloud_path.empty()) {
     lidar_cloud = LoadLidarPointCloud(options_.lidar_point_cloud_path);
+    if (mapper_options.lidar_ba.use_point_to_plane) {
+      THROW_CHECK_GT(lidar_cloud->NumPointsWithNormals(), 0)
+          << "GlobalMapper.lidar_use_point_to_plane=1 requires LiDAR normals. "
+          << "Please provide the downsampled planar LiDAR PLY with nx/ny/nz.";
+      LOG(INFO) << "LiDAR point-to-plane mode will use normals from "
+                << lidar_cloud->NumPointsWithNormals() << " / "
+                << lidar_cloud->Size() << " LiDAR points.";
+    }
     LOG(INFO) << "LiDAR point cloud loaded: "
               << lidar_cloud->Size() << " points."
               << " LiDAR constraints will be applied during BA.";

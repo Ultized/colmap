@@ -47,8 +47,10 @@ namespace colmap {
 // LidarPointCloud will fall back to point-to-point constraints.
 // ---------------------------------------------------------------------------
 struct LidarPoint {
-  Eigen::Vector3d xyz;     // position in the LiDAR / world coordinate frame
-  Eigen::Vector3d normal;  // outward surface normal (unit vector, or zero)
+  Eigen::Vector3d xyz =
+      Eigen::Vector3d::Zero();  // position in the LiDAR / world coordinate frame
+  Eigen::Vector3d normal =
+      Eigen::Vector3d::Zero();  // outward surface normal (unit vector, or zero)
 
   bool HasNormal() const { return normal.squaredNorm() > 0.5; }
 };
@@ -101,6 +103,10 @@ class LidarPointCloud {
   const LidarPoint& Point(size_t idx) const { return points_[idx]; }
   size_t Size() const { return points_.size(); }
   bool Empty() const { return points_.empty(); }
+  size_t NumPointsWithNormals() const { return num_points_with_normals_; }
+  bool AllPointsHaveNormals() const {
+    return !points_.empty() && num_points_with_normals_ == points_.size();
+  }
 
   const std::vector<LidarPoint>& Points() const { return points_; }
 
@@ -110,12 +116,19 @@ class LidarPointCloud {
     // Extract xyz positions for the KD-tree.
     xyz_.clear();
     xyz_.reserve(points_.size());
+    num_points_with_normals_ = 0;
     for (const auto& p : points_) xyz_.push_back(p.xyz);
+    for (const auto& p : points_) {
+      if (p.HasNormal()) {
+        ++num_points_with_normals_;
+      }
+    }
     tree_ = std::make_unique<KDTree3d>(xyz_);
   }
 
   std::vector<LidarPoint> points_;
   std::vector<Eigen::Vector3d> xyz_;  // kept alive for the KD-tree
+  size_t num_points_with_normals_ = 0;
   std::unique_ptr<KDTree3d> tree_;
 };
 
