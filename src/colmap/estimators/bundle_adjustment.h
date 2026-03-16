@@ -30,10 +30,11 @@
 #pragma once
 
 #include "colmap/optim/ransac.h"
+#include "colmap/geometry/rigid3.h"
 #include "colmap/scene/reconstruction.h"
-#include "colmap/util/eigen_alignment.h"
 #include "colmap/util/enum_utils.h"
 
+#include <limits>
 #include <memory>
 #include <unordered_set>
 
@@ -71,6 +72,19 @@ struct BundleAdjustmentSummary {
   virtual std::string BriefReport() const;
 
   virtual ~BundleAdjustmentSummary() = default;
+};
+
+struct AbsolutePosePriorConstraint {
+    image_t image_id = kInvalidImageId;
+    Rigid3d cam_from_world;
+    Eigen::Matrix3d rotation_covariance =
+            Eigen::Matrix3d::Constant(std::numeric_limits<double>::quiet_NaN());
+    Eigen::Matrix3d position_covariance =
+            Eigen::Matrix3d::Constant(std::numeric_limits<double>::quiet_NaN());
+
+    inline bool HasPose() const { return cam_from_world.params.allFinite(); }
+    inline bool HasRotationCov() const { return rotation_covariance.allFinite(); }
+    inline bool HasPositionCov() const { return position_covariance.allFinite(); }
 };
 
 // Configuration container to setup bundle adjustment problems.
@@ -249,6 +263,9 @@ struct PosePriorBundleAdjustmentOptions
   // Fallback if no prior position covariance is provided.
   double prior_position_fallback_stddev = 1.0;
 
+    // Fallback if no prior rotation covariance is provided.
+    double prior_rotation_fallback_stddev_rad = 0.017453292519943295;
+
   // Sim3 alignment options.
   RANSACOptions alignment_ransac_options;
 
@@ -261,6 +278,14 @@ std::unique_ptr<BundleAdjuster> CreatePosePriorBundleAdjuster(
     const PosePriorBundleAdjustmentOptions& prior_options,
     const BundleAdjustmentConfig& config,
     std::vector<PosePrior> pose_priors,
+    Reconstruction& reconstruction);
+
+std::unique_ptr<BundleAdjuster> CreateAbsolutePosePriorBundleAdjuster(
+    const BundleAdjustmentOptions& options,
+    const PosePriorBundleAdjustmentOptions& prior_options,
+    double prior_rotation_fallback_stddev_rad,
+    const BundleAdjustmentConfig& config,
+    std::vector<AbsolutePosePriorConstraint> pose_priors,
     Reconstruction& reconstruction);
 
 }  // namespace colmap
