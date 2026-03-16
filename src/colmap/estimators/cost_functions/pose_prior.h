@@ -80,6 +80,48 @@ struct AbsolutePosePriorCostFunctor
   const Rigid3d world_from_sensor_prior_;
 };
 
+// 6-DoF error on the absolute sensor pose in a rig. The residual is the log of
+// the error pose, splitting SE(3) into SO(3) x R^3. The residual is computed
+// in the sensor frame. Its first and last three components correspond to the
+// rotation and translation errors, respectively.
+struct AbsoluteRigPosePriorCostFunctor
+    : public AutoDiffCostFunctor<AbsoluteRigPosePriorCostFunctor, 6, 7, 7> {
+ public:
+  explicit AbsoluteRigPosePriorCostFunctor(
+      const Rigid3d& sensor_from_world_prior)
+      : world_from_sensor_prior_(Inverse(sensor_from_world_prior)) {}
+
+  template <typename T>
+  bool operator()(const T* const sensor_from_rig,
+                  const T* const rig_from_world,
+                  T* residuals_ptr) const {
+    const Eigen::Quaternion<T> sensor_from_world_rotation =
+        EigenQuaternionMap<T>(sensor_from_rig) *
+        EigenQuaternionMap<T>(rig_from_world);
+    const Eigen::Matrix<T, 3, 1> sensor_from_world_translation =
+        EigenVector3Map<T>(sensor_from_rig + 4) +
+        EigenQuaternionMap<T>(sensor_from_rig) *
+            EigenVector3Map<T>(rig_from_world + 4);
+
+    const Eigen::Quaternion<T> param_from_prior_rotation =
+        sensor_from_world_rotation *
+        world_from_sensor_prior_.rotation().template cast<T>();
+    EigenQuaternionToAngleAxis(param_from_prior_rotation.coeffs().data(),
+                               residuals_ptr);
+
+    Eigen::Map<Eigen::Matrix<T, 3, 1>> param_from_prior_translation(
+        residuals_ptr + 3);
+    param_from_prior_translation =
+        sensor_from_world_translation +
+        sensor_from_world_rotation *
+            world_from_sensor_prior_.translation().template cast<T>();
+    return true;
+  }
+
+ private:
+  const Rigid3d world_from_sensor_prior_;
+};
+
 // 3-DoF error on the sensor position in the world coordinate frame.
 struct AbsolutePosePositionPriorCostFunctor
     : public AutoDiffCostFunctor<AbsolutePosePositionPriorCostFunctor, 3, 7> {

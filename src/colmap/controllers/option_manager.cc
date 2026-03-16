@@ -766,6 +766,10 @@ void OptionManager::AddGlobalMapperOptions() {
   AddDefaultOption("GlobalMapper.ba_ceres_max_num_iterations",
                    &global_mapper->mapper.bundle_adjustment.ceres
                         ->solver_options.max_num_iterations);
+  AddDefaultOption(
+      "GlobalMapper.ba_ceres_min_num_residuals_for_cpu_multi_threading",
+      &global_mapper->mapper.bundle_adjustment.ceres
+           ->min_num_residuals_for_cpu_multi_threading);
   AddDefaultOption("GlobalMapper.ba_skip_fixed_rotation_stage",
                    &global_mapper->mapper.ba_skip_fixed_rotation_stage);
   AddDefaultOption("GlobalMapper.ba_skip_joint_optimization_stage",
@@ -797,6 +801,44 @@ void OptionManager::AddGlobalMapperOptions() {
                    &global_mapper->mapper.max_normalized_reproj_error);
   AddDefaultOption("GlobalMapper.min_tri_angle_deg",
                    &global_mapper->mapper.min_tri_angle_deg);
+
+  // Prior / 6DoF / LiDAR options (minimal migration set).
+  AddDefaultOption("GlobalMapper.use_prior_position",
+                   &global_mapper->mapper.use_prior_position);
+  AddDefaultOption("GlobalMapper.use_6dof_pose_priors",
+                   &global_mapper->mapper.use_6dof_pose_priors);
+  AddDefaultOption("GlobalMapper.six_dof_pose_prior_table",
+                   &global_mapper->mapper.six_dof_pose_prior_table);
+  AddDefaultOption("GlobalMapper.six_dof_prior_rotation_stddev_deg",
+                   &global_mapper->mapper.six_dof_prior_rotation_stddev_deg);
+  AddDefaultOption("GlobalMapper.use_6dof_retriangulation_refinement",
+                   &global_mapper->mapper.use_6dof_retriangulation_refinement);
+  AddDefaultOption("GlobalMapper.max_position_prior_deviation",
+                   &global_mapper->mapper.max_position_prior_deviation);
+  AddDefaultOption(
+      "GlobalMapper.clamp_positions_to_prior_after_optimization",
+      &global_mapper->mapper.clamp_positions_to_prior_after_optimization);
+  AddDefaultOption(
+      "GlobalMapper.delete_frames_with_position_prior_deviation_after_optimization",
+      &global_mapper->mapper
+           .delete_frames_with_position_prior_deviation_after_optimization);
+  AddDefaultOption("GlobalMapper.post_enforcement_max_reprojection_error_px",
+                   &global_mapper->mapper
+                        .post_enforcement_max_reprojection_error_px);
+  AddDefaultOption("GlobalMapper.lidar_point_cloud_path",
+                   &global_mapper->lidar_point_cloud_path);
+  AddDefaultOption("GlobalMapper.lidar_phase1_weight",
+                   &global_mapper->mapper.lidar_phase1_weight);
+  AddDefaultOption("GlobalMapper.lidar_phase2_weight",
+                   &global_mapper->mapper.lidar_phase2_weight);
+  AddDefaultOption("GlobalMapper.lidar_fix_poses_in_lidar_ba",
+                   &global_mapper->mapper.fix_poses_in_lidar_ba);
+  AddDefaultOption(
+      "GlobalMapper.use_lidar_point_to_plane_in_retriangulation",
+      &global_mapper->mapper.use_lidar_point_to_plane_in_retriangulation);
+  AddDefaultOption("GlobalMapper.lidar_retriangulation_max_reprojection_error",
+                   &global_mapper->mapper
+                        .lidar_retriangulation_max_reprojection_error);
 }
 
 void OptionManager::AddGravityRefinerOptions() {

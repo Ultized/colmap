@@ -31,7 +31,6 @@
 
 #include "colmap/estimators/bundle_adjustment.h"
 #include "colmap/math/math.h"
-#include "colmap/optim/ransac.h"
 
 #include <ceres/ceres.h>
 
@@ -96,7 +95,7 @@ struct CeresBundleAdjustmentSummary : public BundleAdjustmentSummary {
   std::string BriefReport() const override;
 
   static std::shared_ptr<CeresBundleAdjustmentSummary> Create(
-      ceres::Solver::Summary ceres_summary);
+      const ceres::Solver::Summary& ceres_summary);
 };
 
 // Ceres-specific pose prior bundle adjustment options.
@@ -106,8 +105,15 @@ struct CeresPosePriorBundleAdjustmentOptions {
       prior_position_loss_function_type =
           CeresBundleAdjustmentOptions::LossFunctionType::TRIVIAL;
 
+  // Loss function for full 6-DoF pose prior loss.
+  CeresBundleAdjustmentOptions::LossFunctionType prior_pose_loss_function_type =
+      CeresBundleAdjustmentOptions::LossFunctionType::TRIVIAL;
+
   // Threshold on the residual for the robust loss.
   double prior_position_loss_scale = std::sqrt(kChiSquare95ThreeDof);
+
+  // Threshold on the residual for the robust full-pose prior loss.
+  double prior_pose_loss_scale = 3.55;
 
   bool Check() const;
 };
@@ -130,6 +136,14 @@ std::unique_ptr<CeresBundleAdjuster> CreatePosePriorCeresBundleAdjuster(
     const PosePriorBundleAdjustmentOptions& prior_options,
     const BundleAdjustmentConfig& config,
     std::vector<PosePrior> pose_priors,
+    Reconstruction& reconstruction);
+
+std::unique_ptr<BundleAdjuster> CreateAbsolutePosePriorCeresBundleAdjuster(
+    const BundleAdjustmentOptions& options,
+    const PosePriorBundleAdjustmentOptions& prior_options,
+    double prior_rotation_fallback_stddev_rad,
+    const BundleAdjustmentConfig& config,
+    std::vector<AbsolutePosePriorConstraint> pose_priors,
     Reconstruction& reconstruction);
 
 void PrintSolverSummary(const ceres::Solver::Summary& summary,

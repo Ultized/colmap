@@ -32,8 +32,10 @@
 #include "colmap/estimators/alignment.h"
 #include "colmap/estimators/two_view_geometry.h"
 #include "colmap/scene/database_cache.h"
-#include "colmap/sfm/global_mapper.h"
-#include "colmap/util/misc.h"
+#include "colmap/scene/database_sqlite.h"
+#include "colmap/scene/lidar_point_cloud.h"
+#include "colmap/sfm/lidar_global_mapper.h"
+#include "colmap/sfm/six_dof_prior_global_mapper.h"
 #include "colmap/util/timer.h"
 
 namespace colmap {
@@ -70,17 +72,16 @@ GlobalPipeline::GlobalPipeline(
     std::shared_ptr<Database> database,
     std::shared_ptr<ReconstructionManager> reconstruction_manager)
     : options_(std::move(options)),
+      database_(std::move(THROW_CHECK_NOTNULL(database))),
       reconstruction_manager_(
           std::move(THROW_CHECK_NOTNULL(reconstruction_manager))) {
-  THROW_CHECK_NOTNULL(database);
-
   // Create database cache with relative poses for pose graph.
   DatabaseCache::Options database_cache_options;
   database_cache_options.min_num_matches = options_.min_num_matches;
   database_cache_options.ignore_watermarks = options_.ignore_watermarks;
   database_cache_options.image_names = {options_.image_names.begin(),
                                         options_.image_names.end()};
-  database_cache_ = DatabaseCache::Create(*database, database_cache_options);
+  database_cache_ = DatabaseCache::Create(*database_, database_cache_options);
   if (options_.decompose_relative_pose) {
     MaybeDecomposeRelativePoses(database_cache_.get());
   }
@@ -96,17 +97,64 @@ void GlobalPipeline::Run() {
   auto reconstruction = std::make_shared<Reconstruction>();
 
   // Prepare mapper options with top-level options.
-  GlobalMapperOptions mapper_options = options_.mapper;
+  LidarGlobalMapperOptions mapper_options = options_.mapper;
   mapper_options.image_path = options_.image_path;
   mapper_options.num_threads = options_.num_threads;
   mapper_options.random_seed = options_.random_seed;
+  if (mapper_options.lidar_ba.use_point_to_plane) {
+    mapper_options.lidar_matching.require_lidar_normals = true;
+  }
 
-  GlobalMapper global_mapper(database_cache_);
-  global_mapper.BeginReconstruction(reconstruction);
+  std::shared_ptr<const LidarPointCloud> lidar_cloud;
+  if (!options_.lidar_point_cloud_path.empty()) {
+    lidar_cloud = LoadLidarPointCloud(options_.lidar_point_cloud_path);
+    if (mapper_options.lidar_ba.use_point_to_plane) {
+      THROW_CHECK_GT(lidar_cloud->NumPointsWithNormals(), 0)
+          << "GlobalMapper.lidar_use_point_to_plane=1 requires LiDAR normals. "
+          << "Please provide a LiDAR PLY with nx/ny/nz.";
+      LOG(INFO) << "LiDAR point-to-plane mode will use normals from "
+                << lidar_cloud->NumPointsWithNormals() << " / "
+                << lidar_cloud->Size() << " points.";
+    }
+    LOG(INFO) << "LiDAR point cloud loaded: " << lidar_cloud->Size()
+              << " points. LiDAR constraints will be available to the mapper.";
+  }
 
   Timer run_timer;
   run_timer.Start();
-  global_mapper.Solve(mapper_options);
+  const bool use_six_dof_priors = options_.mapper.use_6dof_pose_priors &&
+                                  !options_.database_path.empty();
+  std::vector<SixDofPosePrior> six_dof_pose_priors;
+  if (use_six_dof_priors) {
+    six_dof_pose_priors = ReadSixDofPosePriorsFromDatabase(
+        options_.database_path, options_.mapper.six_dof_pose_prior_table);
+    LOG(INFO) << "Loaded " << six_dof_pose_priors.size()
+              << " 6DoF pose priors from table '"
+              << options_.mapper.six_dof_pose_prior_table << "'.";
+  }
+
+  if (use_six_dof_priors && !six_dof_pose_priors.empty()) {
+    SixDofPriorGlobalMapper global_mapper(database_cache_,
+                                          std::move(six_dof_pose_priors),
+                                          lidar_cloud,
+                                          mapper_options.lidar_matching,
+                                          mapper_options.lidar_ba,
+                                          mapper_options.lidar_phase1_weight,
+                                          mapper_options.lidar_phase2_weight,
+                                          mapper_options.fix_poses_in_lidar_ba);
+    global_mapper.BeginReconstruction(reconstruction);
+    if (!global_mapper.Solve(mapper_options)) {
+      LOG(ERROR) << "Global reconstruction failed in 6DoF prior mapper.";
+      return;
+    }
+  } else {
+    LidarGlobalMapper global_mapper(database_cache_, lidar_cloud);
+    global_mapper.BeginReconstruction(reconstruction);
+    if (!global_mapper.Solve(mapper_options)) {
+      LOG(ERROR) << "Global reconstruction failed in LiDAR/global mapper.";
+      return;
+    }
+  }
   LOG(INFO) << "Reconstruction done in " << run_timer.ElapsedSeconds()
             << " seconds";
 

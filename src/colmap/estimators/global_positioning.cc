@@ -15,6 +15,28 @@ Eigen::Vector3d RandVector3d(double low, double high) {
                          RandomUniformReal(low, high));
 }
 
+size_t CountNonFiniteCenters(
+    const std::unordered_map<frame_t, Eigen::Vector3d>& frame_centers) {
+  size_t num_non_finite = 0;
+  for (const auto& [frame_id, center] : frame_centers) {
+    if (!center.allFinite()) {
+      ++num_non_finite;
+    }
+  }
+  return num_non_finite;
+}
+
+size_t CountNonFiniteRigCenters(
+    const std::unordered_map<sensor_t, Eigen::Vector3d>& cams_in_rig) {
+  size_t num_non_finite = 0;
+  for (const auto& [sensor_id, center] : cams_in_rig) {
+    if (!center.allFinite()) {
+      ++num_non_finite;
+    }
+  }
+  return num_non_finite;
+}
+
 }  // namespace
 
 GlobalPositioner::GlobalPositioner(const GlobalPositionerOptions& options)
@@ -54,6 +76,28 @@ bool GlobalPositioner::Solve(const PoseGraph& pose_graph,
   // Parameterize the variables, set image poses / tracks / scales to be
   // constant if desired
   ParameterizeVariables(reconstruction);
+
+  LOG(INFO) << "Global positioner problem stats: residuals="
+            << problem_->NumResiduals()
+            << ", parameter_blocks=" << problem_->NumParameterBlocks()
+            << ", frame_centers=" << frame_centers_.size()
+            << ", unknown_cam_in_rig_centers=" << cams_in_rig_.size()
+            << ", scales=" << scales_.size()
+            << ", non_finite_frame_centers="
+            << CountNonFiniteCenters(frame_centers_)
+            << ", non_finite_cam_in_rig_centers="
+            << CountNonFiniteRigCenters(cams_in_rig_);
+
+  if (problem_->NumResiduals() == 0) {
+    LOG(ERROR) << "Global positioning problem has zero residuals. "
+                  "The optimization is degenerate before Ceres starts.";
+    return false;
+  }
+  if (problem_->NumParameterBlocks() == 0) {
+    LOG(ERROR) << "Global positioning problem has zero parameter blocks. "
+                  "The optimization is degenerate before Ceres starts.";
+    return false;
+  }
 
   LOG(INFO) << "Solving the global positioner problem";
 
@@ -124,10 +168,14 @@ void GlobalPositioner::InitializeRandomPositions(
     if (constrained_positions.find(frame_id) == constrained_positions.end()) {
       continue;
     }
-    if (options_.generate_random_positions && options_.optimize_positions) {
+    const Eigen::Vector3d current_center = frame.RigFromWorld().TgtOriginInSrc();
+    const bool needs_random_initialization =
+        options_.optimize_positions &&
+        (options_.generate_random_positions || !current_center.allFinite());
+    if (needs_random_initialization) {
       frame_centers_[frame_id] = 100.0 * RandVector3d(-1, 1);
     } else {
-      frame_centers_[frame_id] = frame.RigFromWorld().TgtOriginInSrc();
+      frame_centers_[frame_id] = current_center;
     }
   }
 
