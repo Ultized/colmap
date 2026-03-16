@@ -39,6 +39,7 @@ struct GlobalMapperOptions {
       options.ceres->loss_function_type =
           CeresBundleAdjustmentOptions::LossFunctionType::HUBER;
       options.ceres->use_gpu = true;
+      options.ceres->min_num_residuals_for_cpu_multi_threading = 5000;
       // TODO: Investigate whether disabling auto solver selection and using
       // explicit SPARSE_SCHUR + CLUSTER_TRIDIAGONAL is necessary for global
       // SfM, or if we can just rely on COLMAP's auto selection.
@@ -98,6 +99,7 @@ struct GlobalMapperOptions {
 class GlobalMapper {
  public:
   explicit GlobalMapper(std::shared_ptr<const DatabaseCache> database_cache);
+  virtual ~GlobalMapper() = default;
 
   // Prepare the mapper for a new reconstruction. This will initialize the
   // reconstruction and view graph from the database.
@@ -136,6 +138,11 @@ class GlobalMapper {
 
   // Getter functions.
   std::shared_ptr<class Reconstruction> Reconstruction() const;
+
+ protected:
+  const DatabaseCache& GetDatabaseCache() const { return *database_cache_; }
+  PoseGraph& GetPoseGraph() { return *pose_graph_; }
+  class Reconstruction& GetReconstruction() { return *reconstruction_; }
 
  private:
   std::shared_ptr<const DatabaseCache> database_cache_;

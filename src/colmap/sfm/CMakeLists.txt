@@ -34,6 +34,9 @@ COLMAP_ADD_LIBRARY(
     NAME colmap_sfm
     SRCS
         global_mapper.h global_mapper.cc
+        lidar_global_mapper.h lidar_global_mapper.cc
+        prior_global_mapper.h prior_global_mapper.cc
+        six_dof_prior_global_mapper.h six_dof_prior_global_mapper.cc
         incremental_mapper_impl.h incremental_mapper_impl.cc
         incremental_mapper.h incremental_mapper.cc
         incremental_triangulator.h incremental_triangulator.cc

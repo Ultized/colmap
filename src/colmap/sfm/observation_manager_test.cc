@@ -209,6 +209,54 @@ TEST(ObservationManager, FilterPoints3DWithLargeReprojectionErrorTypes) {
             2);
 }
 
+TEST(ObservationManager, FilterObservationsWithLargeReprojectionErrorKeepsTrack) {
+  Reconstruction reconstruction;
+  const camera_t kCameraId = 1;
+  Camera camera = Camera::CreateFromModelId(
+      kCameraId, CameraModelId::kPinhole, 100, 100, 100);
+  reconstruction.AddCamera(camera);
+
+  Rig rig;
+  rig.SetRigId(1);
+  rig.AddRefSensor(camera.SensorId());
+  reconstruction.AddRig(rig);
+
+  for (image_t image_id = 1; image_id <= 3; ++image_id) {
+    Frame frame;
+    frame.SetFrameId(image_id);
+    frame.SetRigId(rig.RigId());
+    frame.AddDataId(data_t(camera.SensorId(), image_id));
+    frame.SetRigFromWorld(Rigid3d());
+    reconstruction.AddFrame(frame);
+
+    Image image;
+    image.SetImageId(image_id);
+    image.SetCameraId(kCameraId);
+    image.SetFrameId(frame.FrameId());
+    image.SetPoints2D({Eigen::Vector2d(50, 50)});
+    reconstruction.AddImage(image);
+  }
+
+  ObservationManager obs_manager(reconstruction);
+
+  const point3D_t point3D_id =
+      reconstruction.AddPoint3D(Eigen::Vector3d(0.0, 0.0, 2.0), Track());
+  reconstruction.AddObservation(point3D_id, TrackElement(1, 0));
+  reconstruction.AddObservation(point3D_id, TrackElement(2, 0));
+  reconstruction.AddObservation(point3D_id, TrackElement(3, 0));
+
+  reconstruction.Image(3).SetPoints2D({Eigen::Vector2d(70, 50)});
+
+  EXPECT_EQ(obs_manager.FilterObservationsWithLargeReprojectionError(
+                1.0, {point3D_id}, ReprojectionErrorType::PIXEL),
+            1);
+  EXPECT_TRUE(reconstruction.ExistsPoint3D(point3D_id));
+  EXPECT_EQ(reconstruction.Point3D(point3D_id).track.Length(), 2);
+  EXPECT_TRUE(reconstruction.Image(1).Point2D(0).HasPoint3D());
+  EXPECT_TRUE(reconstruction.Image(2).Point2D(0).HasPoint3D());
+  EXPECT_FALSE(reconstruction.Image(3).Point2D(0).HasPoint3D());
+}
+
 TEST(ObservationManager, FilterPoints3DInImages) {
   Reconstruction reconstruction;
   GenerateReconstruction(2, reconstruction);

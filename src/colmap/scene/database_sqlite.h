@@ -29,17 +29,44 @@
 
 #pragma once
 
+#include "colmap/geometry/pose_prior.h"
+#include "colmap/geometry/rigid3.h"
 #include "colmap/scene/database.h"
 
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <vector>
+
+#include <Eigen/Core>
 
 namespace colmap {
 
 // Can be used to construct temporary in-memory database.
 constexpr inline char kInMemorySqliteDatabasePath[] = ":memory:";
 
+struct SixDofPosePrior {
+  data_t corr_data_id = kInvalidDataId;
+  std::string image_name;
+  Rigid3d cam_from_world;
+  Eigen::Matrix3d rotation_covariance =
+	  Eigen::Matrix3d::Constant(PosePrior::kNaN);
+  Eigen::Matrix3d position_covariance =
+	  Eigen::Matrix3d::Constant(PosePrior::kNaN);
+  PosePrior::CoordinateSystem coordinate_system =
+	  PosePrior::CoordinateSystem::UNDEFINED;
+  Eigen::Vector3d gravity = Eigen::Vector3d::Constant(PosePrior::kNaN);
+
+  inline bool HasPose() const { return cam_from_world.params.allFinite(); }
+  inline bool HasRotationCov() const { return rotation_covariance.allFinite(); }
+  inline bool HasPositionCov() const { return position_covariance.allFinite(); }
+  inline bool HasGravity() const { return gravity.allFinite(); }
+};
+
 std::shared_ptr<Database> OpenSqliteDatabase(const std::filesystem::path& path);
+
+std::vector<SixDofPosePrior> ReadSixDofPosePriorsFromDatabase(
+	const std::filesystem::path& path,
+  const std::string& table_name = "6dof_pose_priors");
 
 }  // namespace colmap

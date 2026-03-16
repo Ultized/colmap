@@ -28,6 +28,7 @@
 // POSSIBILITY OF SUCH DAMAGE.
 
 #include "colmap/scene/database.h"
+#include "colmap/scene/database_sqlite.h"
 #include "colmap/util/endian.h"
 #include "colmap/util/string.h"
 #include "colmap/util/version.h"
@@ -36,6 +37,19 @@
 
 namespace colmap {
 namespace {
+
+std::string QuoteSqlIdentifier(const std::string& identifier) {
+  std::string quoted = "\"";
+  for (const char character : identifier) {
+    if (character == '\"') {
+      quoted += "\"\"";
+    } else {
+      quoted.push_back(character);
+    }
+  }
+  quoted.push_back('\"');
+  return quoted;
+}
 
 inline int SQLite3CallHelper(int result_code,
                              const std::string& filename,
@@ -412,6 +426,42 @@ PosePrior ReadPosePriorRow(sqlite3_stmt* sql_stmt) {
       sqlite3_column_int64(sql_stmt, 6));
   pose_prior.gravity =
       ReadStaticMatrixBlob<Eigen::Vector3d>(sql_stmt, SQLITE_ROW, 7);
+  return pose_prior;
+}
+
+SixDofPosePrior ReadSixDofPosePriorRow(sqlite3_stmt* sql_stmt) {
+  SixDofPosePrior pose_prior;
+  pose_prior.corr_data_id.id = sqlite3_column_int64(sql_stmt, 0);
+  pose_prior.image_name = std::string(reinterpret_cast<const char*>(
+      sqlite3_column_text(sql_stmt, 1)));
+  pose_prior.corr_data_id.sensor_id.id = sqlite3_column_int64(sql_stmt, 2);
+  pose_prior.corr_data_id.sensor_id.type = SensorType::CAMERA;
+
+  const Eigen::Vector4d qvec =
+      ReadStaticMatrixBlob<Eigen::Vector4d>(sql_stmt, SQLITE_ROW, 3);
+  const Eigen::Vector3d tvec =
+      ReadStaticMatrixBlob<Eigen::Vector3d>(sql_stmt, SQLITE_ROW, 4);
+  pose_prior.cam_from_world = Rigid3d(
+      Eigen::Quaterniond(qvec(0), qvec(1), qvec(2), qvec(3)).normalized(),
+      tvec);
+
+  if (sqlite3_column_type(sql_stmt, 5) != SQLITE_NULL) {
+      pose_prior.rotation_covariance =
+      ReadStaticMatrixBlob<Eigen::Matrix3d>(sql_stmt, SQLITE_ROW, 5);
+    }
+    if (sqlite3_column_type(sql_stmt, 6) != SQLITE_NULL) {
+    pose_prior.position_covariance =
+      ReadStaticMatrixBlob<Eigen::Matrix3d>(sql_stmt, SQLITE_ROW, 6);
+  }
+    if (sqlite3_column_type(sql_stmt, 7) != SQLITE_NULL) {
+    pose_prior.gravity =
+      ReadStaticMatrixBlob<Eigen::Vector3d>(sql_stmt, SQLITE_ROW, 7);
+  }
+    if (sqlite3_column_type(sql_stmt, 8) != SQLITE_NULL) {
+    pose_prior.coordinate_system = static_cast<PosePrior::CoordinateSystem>(
+      sqlite3_column_int64(sql_stmt, 8));
+  }
+
   return pose_prior;
 }
 
@@ -2508,6 +2558,57 @@ class SqliteDatabase : public Database {
 std::mutex SqliteDatabase::update_schema_mutex_;
 
 }  // namespace
+
+std::vector<SixDofPosePrior> ReadSixDofPosePriorsFromDatabase(
+    const std::filesystem::path& path,
+    const std::string& table_name) {
+  sqlite3* database = nullptr;
+  SQLITE3_CALL(sqlite3_open_v2(
+      path.string().c_str(), &database, SQLITE_OPEN_READONLY, nullptr));
+
+  auto finalize_stmt = [](sqlite3_stmt* stmt) {
+    if (stmt != nullptr) {
+      SQLITE3_CALL(sqlite3_finalize(stmt));
+    }
+  };
+
+  sqlite3_stmt* table_stmt = nullptr;
+  SQLITE3_CALL(sqlite3_prepare_v2(
+      database,
+      "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1;",
+      -1,
+      &table_stmt,
+      nullptr));
+  SQLITE3_CALL(sqlite3_bind_text(
+      table_stmt, 1, table_name.c_str(), static_cast<int>(table_name.size()),
+      SQLITE_STATIC));
+  const bool table_exists = SQLITE3_CALL(sqlite3_step(table_stmt)) == SQLITE_ROW;
+  finalize_stmt(table_stmt);
+
+  if (!table_exists) {
+    SQLITE3_CALL(sqlite3_close(database));
+    return {};
+  }
+
+  const std::string query =
+      "SELECT image_id, image_name, camera_id, qvec, tvec, "
+      "rotation_covariance, position_covariance, gravity, coordinate_system "
+      "FROM " + QuoteSqlIdentifier(table_name) +
+      " WHERE qvec IS NOT NULL AND tvec IS NOT NULL ORDER BY image_id;";
+
+  sqlite3_stmt* sql_stmt = nullptr;
+  SQLITE3_CALL(
+      sqlite3_prepare_v2(database, query.c_str(), -1, &sql_stmt, nullptr));
+
+  std::vector<SixDofPosePrior> pose_priors;
+  while (SQLITE3_CALL(sqlite3_step(sql_stmt)) == SQLITE_ROW) {
+    pose_priors.push_back(ReadSixDofPosePriorRow(sql_stmt));
+  }
+
+  finalize_stmt(sql_stmt);
+  SQLITE3_CALL(sqlite3_close(database));
+  return pose_priors;
+}
 
 std::shared_ptr<Database> OpenSqliteDatabase(
     const std::filesystem::path& path) {
