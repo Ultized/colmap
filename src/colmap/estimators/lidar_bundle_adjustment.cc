@@ -371,14 +371,17 @@ class LidarBundleAdjusterImpl : public BundleAdjuster {
         raw_loss = new ceres::HuberLoss(lidar_options.loss_scale);
         break;
     }
+    // Store raw_loss in a shared_ptr so it outlives the Ceres Problem.
+    if (raw_loss) raw_loss_.reset(raw_loss);
     // Wrap with ScaledLoss to apply the weight schedule.
+    // The Problem takes ownership of scaled_loss via AddResidualBlock,
+    // so we must NOT also store it in a shared_ptr (double-free).
+    // Use DO_NOT_TAKE_OWNERSHIP so ScaledLoss does not delete raw_loss
+    // (raw_loss_ already manages its lifetime).
     ceres::LossFunction* scaled_loss =
         new ceres::ScaledLoss(raw_loss,
                               lidar_options.weight,
                               ceres::DO_NOT_TAKE_OWNERSHIP);
-    // Store in a shared_ptr so ownership is clear.
-    loss_function_.reset(scaled_loss);
-    if (raw_loss) raw_loss_.reset(raw_loss);
 
     // 3. Add LiDAR residuals for every constraint whose point3D is a variable
     //    parameter block in the problem.
@@ -425,7 +428,8 @@ class LidarBundleAdjusterImpl : public BundleAdjuster {
 
  private:
   std::unique_ptr<BundleAdjuster> inner_;
-  std::shared_ptr<ceres::LossFunction> loss_function_;
+  // Prevent raw_loss from being destroyed before the Ceres Problem
+  // (which owns the ScaledLoss wrapping it).
   std::shared_ptr<ceres::LossFunction> raw_loss_;
 };
 

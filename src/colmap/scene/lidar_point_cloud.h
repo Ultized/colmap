@@ -30,6 +30,7 @@
 #pragma once
 
 #include "colmap/geometry/kdtree3d.h"
+#include "colmap/util/logging.h"
 #include "colmap/util/types.h"
 
 #include <filesystem>
@@ -82,6 +83,8 @@ class LidarPointCloud {
   };
 
   NNResult NearestNeighbor(const Eigen::Vector3d& query) const {
+    THROW_CHECK(tree_ != nullptr)
+        << "NearestNeighbor called on empty LidarPointCloud";
     const auto r = tree_->NearestNeighbor(query);
     return {r.index, r.sq_dist};
   }
@@ -90,6 +93,8 @@ class LidarPointCloud {
   // has fewer than k points).
   std::vector<NNResult> KNearestNeighbors(const Eigen::Vector3d& query,
                                            int k) const {
+    THROW_CHECK(tree_ != nullptr)
+        << "KNearestNeighbors called on empty LidarPointCloud";
     const auto raw = tree_->KNearestNeighbors(query, k);
     std::vector<NNResult> out;
     out.reserve(raw.size());
