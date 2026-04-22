@@ -756,6 +756,8 @@ void OptionManager::AddGlobalMapperOptions() {
                    &global_mapper->mapper.global_positioning.optimize_points);
   AddDefaultOption("GlobalMapper.gp_optimize_scales",
                    &global_mapper->mapper.global_positioning.optimize_scales);
+  AddDefaultOption("GlobalMapper.gp_generate_scales",
+                   &global_mapper->mapper.global_positioning.generate_scales);
   AddDefaultOption(
       "GlobalMapper.gp_loss_function_scale",
       &global_mapper->mapper.global_positioning.loss_function_scale);
