@@ -1029,6 +1029,62 @@ SixDofPriorGlobalMapper::SixDofPriorGlobalMapper(
     image_to_six_dof_prior_[static_cast<image_t>(pose_prior.corr_data_id.id)] =
         &pose_prior;
   }
+  BuildTemporalTriplets();
+}
+
+void SixDofPriorGlobalMapper::BuildTemporalTriplets() {
+  temporal_triplets_.clear();
+
+  // Group by sensor_id (camera). Retain only priors with finite timestamps.
+  std::unordered_map<uint64_t, std::vector<const SixDofPosePrior*>> by_sensor;
+  size_t num_without_ts = 0;
+  for (const auto& pose_prior : six_dof_pose_priors_) {
+    if (pose_prior.corr_data_id.sensor_id.type != SensorType::CAMERA) {
+      continue;
+    }
+    if (!pose_prior.HasTimestamp()) {
+      ++num_without_ts;
+      continue;
+    }
+    by_sensor[pose_prior.corr_data_id.sensor_id.id].push_back(&pose_prior);
+  }
+
+  if (num_without_ts > 0) {
+    LOG(WARNING) << "Temporal smoothness: " << num_without_ts
+                 << " pose prior(s) have no timestamp and will not contribute "
+                    "to temporal triplets. Make sure the import util was run "
+                    "with a valid --timestamps_path (or sparse_model/"
+                    "timestamps.json sidecar).";
+  }
+
+  for (auto& [sensor_id, priors] : by_sensor) {
+    std::sort(priors.begin(), priors.end(),
+              [](const SixDofPosePrior* a, const SixDofPosePrior* b) {
+                return a->timestamp < b->timestamp;
+              });
+    for (size_t i = 1; i + 1 < priors.size(); ++i) {
+      const double t_prev = priors[i - 1]->timestamp;
+      const double t_curr = priors[i]->timestamp;
+      const double t_next = priors[i + 1]->timestamp;
+      const double dt_prev = t_curr - t_prev;
+      const double dt_next = t_next - t_curr;
+      if (!(dt_prev > 0.0) || !(dt_next > 0.0)) {
+        continue;
+      }
+      TemporalSmoothnessTriplet triplet;
+      triplet.prev_image_id =
+          static_cast<image_t>(priors[i - 1]->corr_data_id.id);
+      triplet.curr_image_id =
+          static_cast<image_t>(priors[i]->corr_data_id.id);
+      triplet.next_image_id =
+          static_cast<image_t>(priors[i + 1]->corr_data_id.id);
+      triplet.dt_prev = dt_prev;
+      triplet.dt_next = dt_next;
+      temporal_triplets_.push_back(triplet);
+    }
+  }
+  LOG(INFO) << "Temporal smoothness: built " << temporal_triplets_.size()
+            << " triplet(s) across " << by_sensor.size() << " camera(s).";
 }
 
 bool SixDofPriorGlobalMapper::ShouldUseSixDofPosePriors(
@@ -1686,7 +1742,8 @@ bool SixDofPriorGlobalMapper::RunPostEnforcementCleanup(
                                    mapper_options,
                                    "post_enforcement_cleanup_6dof_ba",
                                    prior_options,
-                                   prior_rotation_fallback_stddev_rad);
+                                   prior_rotation_fallback_stddev_rad,
+                                   /*populate_temporal_triplets=*/true);
   } else if (use_prior) {
     ok = RunPosePriorBundleAdjustment(mapper_options.bundle_adjustment,
                                       prior_options);
@@ -1752,7 +1809,8 @@ bool SixDofPriorGlobalMapper::RunSixDofBundleAdjustment(
   const PriorGlobalMapperOptions& mapper_options,
   const char* stage_name,
     const PosePriorBundleAdjustmentOptions& prior_options,
-    double prior_rotation_fallback_stddev_rad) {
+    double prior_rotation_fallback_stddev_rad,
+    bool populate_temporal_triplets) {
   auto& recon = GetReconstruction();
   if (recon.NumImages() == 0) {
     LOG(ERROR) << "Cannot run 6DoF bundle adjustment: no images";
@@ -1768,6 +1826,47 @@ bool SixDofPriorGlobalMapper::RunSixDofBundleAdjustment(
     if (ImageHasFinitePose(img)) {
       ba_config.AddImage(img_id);
     }
+  }
+
+  if (populate_temporal_triplets &&
+      ba_options.use_temporal_smoothness_prior &&
+      !temporal_triplets_.empty()) {
+    std::vector<TemporalSmoothnessTriplet> eligible;
+    eligible.reserve(temporal_triplets_.size());
+    const double max_ratio = ba_options.temporal_smoothness_max_dt_ratio;
+    const double max_dt_s = ba_options.temporal_smoothness_max_dt_seconds;
+    size_t num_skipped_unregistered = 0;
+    size_t num_skipped_gap = 0;
+    for (const auto& t : temporal_triplets_) {
+      if (!ba_config.HasImage(t.prev_image_id) ||
+          !ba_config.HasImage(t.curr_image_id) ||
+          !ba_config.HasImage(t.next_image_id)) {
+        ++num_skipped_unregistered;
+        continue;
+      }
+      if (t.dt_prev <= 0.0 || t.dt_next <= 0.0) {
+        ++num_skipped_gap;
+        continue;
+      }
+      if (max_dt_s > 0.0 &&
+          (t.dt_prev > max_dt_s || t.dt_next > max_dt_s)) {
+        ++num_skipped_gap;
+        continue;
+      }
+      const double ratio = std::max(t.dt_prev / t.dt_next,
+                                    t.dt_next / t.dt_prev);
+      if (max_ratio > 0.0 && ratio > max_ratio) {
+        ++num_skipped_gap;
+        continue;
+      }
+      eligible.push_back(t);
+    }
+    LOG(INFO) << "Temporal smoothness at " << stage_name << ": "
+              << eligible.size() << " eligible / "
+              << temporal_triplets_.size() << " total triplets; skipped "
+              << num_skipped_unregistered << " unregistered, "
+              << num_skipped_gap << " gap/ratio.";
+    ba_config.SetTemporalSmoothnessTriplets(std::move(eligible));
   }
 
   auto ba = CreateAbsolutePosePriorBundleAdjuster(ba_options,
@@ -1823,7 +1922,8 @@ bool SixDofPriorGlobalMapper::IterativeSixDofBundleAdjustment(
               mapper_options,
               StringPrintf("iterative_6dof_ba_%d_joint", ite + 1).c_str(),
               prior_options,
-              prior_rotation_fallback_stddev_rad)) {
+              prior_rotation_fallback_stddev_rad,
+              /*populate_temporal_triplets=*/true)) {
         return false;
       }
     }
@@ -2232,6 +2332,12 @@ bool SixDofPriorGlobalMapper::Solve(const PriorGlobalMapperOptions& options) {
   PriorGlobalMapperOptions opts = InitializeSixDofOptions(options);
   const bool use_prior = ShouldUsePriorPosition(opts);
   const bool use_6dof = ShouldUseSixDofPosePriors(opts);
+  // NOTE: Forcing a glog flush here works around a reproducible silent crash
+  // (exit code 9, no stderr) observed on some configurations when transitioning
+  // into the 6DoF / LiDAR Solve path. The flush forces out any pending stderr
+  // handles that Windows may tear down out-of-order otherwise. Do not remove
+  // without testing on a large multi-camera dataset.
+  google::FlushLogFiles(google::GLOG_INFO);
 
   PosePriorBundleAdjustmentOptions prior_ba_opts = opts.pose_prior_ba;
   if (use_prior) {
@@ -2249,6 +2355,7 @@ bool SixDofPriorGlobalMapper::Solve(const PriorGlobalMapperOptions& options) {
 
   const double prior_rotation_fallback_stddev_rad =
       DegToRad(opts.six_dof_prior_rotation_stddev_deg);
+  google::FlushLogFiles(google::GLOG_INFO);
 
   if (use_6dof) {
     LOG(INFO) << "SixDofPriorGlobalMapper: full 6DoF priors ENABLED ("

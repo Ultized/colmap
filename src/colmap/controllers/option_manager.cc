@@ -507,6 +507,23 @@ void OptionManager::AddBundleAdjustmentOptions() {
                    &bundle_adjustment->constant_rig_from_world_rotation);
   AddDefaultOption("BundleAdjustment.min_track_length",
                    &bundle_adjustment->min_track_length);
+  AddDefaultOption("BundleAdjustment.use_temporal_smoothness_prior",
+                   &bundle_adjustment->use_temporal_smoothness_prior);
+  AddDefaultOption(
+      "BundleAdjustment.temporal_smoothness_rotation_stddev_deg",
+      &bundle_adjustment->temporal_smoothness_rotation_stddev_deg);
+  AddDefaultOption(
+      "BundleAdjustment.temporal_smoothness_translation_stddev_m",
+      &bundle_adjustment->temporal_smoothness_translation_stddev_m);
+  AddDefaultOption(
+      "BundleAdjustment.temporal_smoothness_max_dt_ratio",
+      &bundle_adjustment->temporal_smoothness_max_dt_ratio);
+  AddDefaultOption(
+      "BundleAdjustment.temporal_smoothness_max_dt_seconds",
+      &bundle_adjustment->temporal_smoothness_max_dt_seconds);
+  AddDefaultOption(
+      "BundleAdjustment.temporal_smoothness_huber_threshold",
+      &bundle_adjustment->temporal_smoothness_huber_threshold);
 
   // Ceres-specific options
   AddDefaultOption(
@@ -755,6 +772,29 @@ void OptionManager::AddGlobalMapperOptions() {
                    &global_mapper->mapper.bundle_adjustment.refine_points3D);
   AddDefaultOption("GlobalMapper.ba_min_track_length",
                    &global_mapper->mapper.bundle_adjustment.min_track_length);
+  AddDefaultOption(
+      "GlobalMapper.ba_use_temporal_smoothness_prior",
+      &global_mapper->mapper.bundle_adjustment.use_temporal_smoothness_prior);
+  AddDefaultOption(
+      "GlobalMapper.ba_temporal_smoothness_rotation_stddev_deg",
+      &global_mapper->mapper.bundle_adjustment
+           .temporal_smoothness_rotation_stddev_deg);
+  AddDefaultOption(
+      "GlobalMapper.ba_temporal_smoothness_translation_stddev_m",
+      &global_mapper->mapper.bundle_adjustment
+           .temporal_smoothness_translation_stddev_m);
+  AddDefaultOption(
+      "GlobalMapper.ba_temporal_smoothness_max_dt_ratio",
+      &global_mapper->mapper.bundle_adjustment
+           .temporal_smoothness_max_dt_ratio);
+  AddDefaultOption(
+      "GlobalMapper.ba_temporal_smoothness_max_dt_seconds",
+      &global_mapper->mapper.bundle_adjustment
+           .temporal_smoothness_max_dt_seconds);
+  AddDefaultOption(
+      "GlobalMapper.ba_temporal_smoothness_huber_threshold",
+      &global_mapper->mapper.bundle_adjustment
+           .temporal_smoothness_huber_threshold);
   // Bundle adjustment options (Ceres-specific).
   AddDefaultOption("GlobalMapper.ba_ceres_use_gpu",
                    &global_mapper->mapper.bundle_adjustment.ceres->use_gpu);

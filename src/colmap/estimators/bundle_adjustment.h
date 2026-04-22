@@ -87,6 +87,19 @@ struct AbsolutePosePriorConstraint {
     inline bool HasPositionCov() const { return position_covariance.allFinite(); }
 };
 
+// Constant-velocity (zero-acceleration) temporal smoothness triplet connecting
+// three temporally-adjacent images from the same sensor. dt_prev = t_curr -
+// t_prev, dt_next = t_next - t_curr (both in seconds, > 0). The caller is
+// responsible for grouping by sensor and filtering out triplets that span
+// sequence gaps.
+struct TemporalSmoothnessTriplet {
+  image_t prev_image_id = kInvalidImageId;
+  image_t curr_image_id = kInvalidImageId;
+  image_t next_image_id = kInvalidImageId;
+  double dt_prev = 0.0;
+  double dt_next = 0.0;
+};
+
 // Configuration container to setup bundle adjustment problems.
 class BundleAdjustmentConfig {
  public:
@@ -152,6 +165,12 @@ class BundleAdjustmentConfig {
   const std::unordered_set<sensor_t>& ConstantSensorFromRigPoses() const;
   const std::unordered_set<frame_t>& ConstantRigFromWorldPoses() const;
 
+  // Runtime-built list of constant-velocity smoothness triplets. Only the
+  // final joint BA populates this (retriangulation BA leaves it empty).
+  void SetTemporalSmoothnessTriplets(std::vector<TemporalSmoothnessTriplet> t);
+  const std::vector<TemporalSmoothnessTriplet>&
+  TemporalSmoothnessTriplets() const;
+
  private:
   BundleAdjustmentGauge fixed_gauge_ = BundleAdjustmentGauge::UNSPECIFIED;
   std::unordered_set<camera_t> constant_cam_intrinsics_;
@@ -161,6 +180,7 @@ class BundleAdjustmentConfig {
   std::unordered_set<point3D_t> ignored_point3D_ids_;
   std::unordered_set<sensor_t> constant_sensor_from_rig_poses_;
   std::unordered_set<frame_t> constant_rig_from_world_poses_;
+  std::vector<TemporalSmoothnessTriplet> temporal_smoothness_triplets_;
 };
 
 struct BundleAdjustmentBackendOptions {
@@ -206,6 +226,22 @@ struct BundleAdjustmentOptions : public BundleAdjustmentBackendOptions {
   // Only takes effect when refine_rig_from_world is true.
   // When true, only translation is refined.
   bool constant_rig_from_world_rotation = false;
+
+  // Enable the constant-velocity (zero-acceleration) temporal smoothness
+  // prior on adjacent triplets of same-sensor images. Residuals are only
+  // added when BundleAdjustmentConfig::TemporalSmoothnessTriplets() is
+  // non-empty, so retriangulation-phase BA calls are unaffected even when
+  // this flag is true.
+  bool use_temporal_smoothness_prior = false;
+  double temporal_smoothness_rotation_stddev_deg = 1.0;
+  double temporal_smoothness_translation_stddev_m = 0.05;
+  // Triplets whose dt_next/dt_prev ratio falls outside [1/r, r] are rejected
+  // by the caller's builder (sequence gaps, dropped frames).
+  double temporal_smoothness_max_dt_ratio = 3.0;
+  // Triplets with any inter-frame dt above this (seconds) are also rejected.
+  double temporal_smoothness_max_dt_seconds = 2.0;
+  // Huber cutoff (in units of normalized residual). 0 disables Huber.
+  double temporal_smoothness_huber_threshold = 3.0;
 
   // Whether to print a final summary.
   bool print_summary = true;

@@ -644,6 +644,8 @@ class DefaultBundleAdjuster : public CeresBundleAdjuster {
       default:
         LOG(FATAL_THROW) << "Unknown BundleAdjustmentGauge";
     }
+
+    AddTemporalSmoothnessResidualsToProblem(reconstruction);
   }
 
   std::shared_ptr<BundleAdjustmentSummary> Solve() override {
@@ -870,9 +872,91 @@ class DefaultBundleAdjuster : public CeresBundleAdjuster {
     }
   }
 
+  void AddTemporalSmoothnessResidualsToProblem(Reconstruction& reconstruction) {
+    if (!options_.use_temporal_smoothness_prior) {
+      return;
+    }
+    const auto& triplets = config_.TemporalSmoothnessTriplets();
+    if (triplets.empty()) {
+      return;
+    }
+
+    constexpr double kRadiansPerDegree = 0.01745329251994329577;
+    const double sigma_rot_rad =
+        options_.temporal_smoothness_rotation_stddev_deg * kRadiansPerDegree;
+    const double sigma_trans_m =
+        options_.temporal_smoothness_translation_stddev_m;
+
+    if (options_.temporal_smoothness_huber_threshold > 0.0) {
+      temporal_loss_function_ = std::make_unique<ceres::HuberLoss>(
+          options_.temporal_smoothness_huber_threshold);
+    }
+    ceres::LossFunction* loss_ptr = temporal_loss_function_.get();
+
+    int num_added = 0;
+    int num_skipped_missing = 0;
+    int num_skipped_const = 0;
+    int num_skipped_same_frame = 0;
+    for (const auto& t : triplets) {
+      if (!reconstruction.ExistsImage(t.prev_image_id) ||
+          !reconstruction.ExistsImage(t.curr_image_id) ||
+          !reconstruction.ExistsImage(t.next_image_id)) {
+        ++num_skipped_missing;
+        continue;
+      }
+      Image& img_prev = reconstruction.Image(t.prev_image_id);
+      Image& img_curr = reconstruction.Image(t.curr_image_id);
+      Image& img_next = reconstruction.Image(t.next_image_id);
+      if (!img_prev.HasFramePtr() || !img_curr.HasFramePtr() ||
+          !img_next.HasFramePtr()) {
+        ++num_skipped_missing;
+        continue;
+      }
+      if (!config_.HasImage(t.prev_image_id) ||
+          !config_.HasImage(t.curr_image_id) ||
+          !config_.HasImage(t.next_image_id)) {
+        ++num_skipped_missing;
+        continue;
+      }
+
+      double* p_prev = img_prev.FramePtr()->RigFromWorld().params.data();
+      double* p_curr = img_curr.FramePtr()->RigFromWorld().params.data();
+      double* p_next = img_next.FramePtr()->RigFromWorld().params.data();
+
+      if (p_prev == p_curr || p_curr == p_next || p_prev == p_next) {
+        ++num_skipped_same_frame;
+        continue;
+      }
+      if (!problem_->HasParameterBlock(p_prev) ||
+          !problem_->HasParameterBlock(p_curr) ||
+          !problem_->HasParameterBlock(p_next) ||
+          problem_->IsParameterBlockConstant(p_prev) ||
+          problem_->IsParameterBlockConstant(p_curr) ||
+          problem_->IsParameterBlockConstant(p_next)) {
+        ++num_skipped_const;
+        continue;
+      }
+
+      problem_->AddResidualBlock(
+          ConstantVelocityPriorCostFunctor::Create(
+              t.dt_prev, t.dt_next, sigma_rot_rad, sigma_trans_m),
+          loss_ptr,
+          p_prev,
+          p_curr,
+          p_next);
+      ++num_added;
+    }
+
+    LOG(INFO) << "Temporal smoothness prior: added " << num_added
+              << " residual(s); skipped " << num_skipped_missing
+              << " missing, " << num_skipped_const << " constant, "
+              << num_skipped_same_frame << " same-frame.";
+  }
+
  private:
   std::shared_ptr<ceres::Problem> problem_;
   std::unique_ptr<ceres::LossFunction> loss_function_;
+  std::unique_ptr<ceres::LossFunction> temporal_loss_function_;
 
   std::set<camera_t> parameterized_camera_ids_;
   std::set<image_t> parameterized_image_ids_;

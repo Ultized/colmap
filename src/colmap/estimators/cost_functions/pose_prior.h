@@ -221,4 +221,76 @@ struct RelativePosePriorCostFunctor
   const Rigid3d j_from_i_prior_;
 };
 
+// Constant-velocity / zero-acceleration prior on three temporally adjacent
+// camera poses from the same sensor. The residual compares the forward
+// inter-frame twist with the (dt-scaled) backward inter-frame twist; it is
+// exactly zero for any uniform-screw trajectory T_k = exp(k * dt_k * xi) * T_0.
+//
+// Parameter blocks are Rigid3d-layout (qx, qy, qz, qw, tx, ty, tz); all three
+// are cam_from_world (or rig_from_world) poses expressed in the same world
+// frame. The 6D residual is split into a 3D rotation part (angle-axis) and a
+// 3D translation part, each normalized by its sigma. Decoupled SO(3) x R^3 is
+// used as a first-order approximation to SE(3)-log; it is exact for the
+// constant-velocity case we are penalizing and accurate to O(|omega| * |t|)
+// for non-constant jerk — well within SLAM inter-frame rotation regimes.
+struct ConstantVelocityPriorCostFunctor
+    : public AutoDiffCostFunctor<ConstantVelocityPriorCostFunctor,
+                                 6,
+                                 7,
+                                 7,
+                                 7> {
+ public:
+  ConstantVelocityPriorCostFunctor(double dt_prev,
+                                   double dt_next,
+                                   double sigma_rot_rad,
+                                   double sigma_trans_m)
+      : dt_ratio_(dt_next / dt_prev),
+        inv_sigma_rot_(1.0 / sigma_rot_rad),
+        inv_sigma_trans_(1.0 / sigma_trans_m) {}
+
+  template <typename T>
+  bool operator()(const T* const cam_from_world_prev,
+                  const T* const cam_from_world_curr,
+                  const T* const cam_from_world_next,
+                  T* residuals_ptr) const {
+    const Eigen::Quaternion<T> q_prev = EigenQuaternionMap<T>(cam_from_world_prev);
+    const Eigen::Quaternion<T> q_curr = EigenQuaternionMap<T>(cam_from_world_curr);
+    const Eigen::Quaternion<T> q_next = EigenQuaternionMap<T>(cam_from_world_next);
+    const Eigen::Matrix<T, 3, 1> t_prev = EigenVector3Map<T>(cam_from_world_prev + 4);
+    const Eigen::Matrix<T, 3, 1> t_curr = EigenVector3Map<T>(cam_from_world_curr + 4);
+    const Eigen::Matrix<T, 3, 1> t_next = EigenVector3Map<T>(cam_from_world_next + 4);
+
+    // delta_back = T_curr * Inverse(T_prev):
+    //   q = q_curr * q_prev.conjugate()
+    //   t = t_curr - q * t_prev
+    const Eigen::Quaternion<T> q_back = q_curr * q_prev.conjugate();
+    const Eigen::Matrix<T, 3, 1> t_back = t_curr - (q_back * t_prev);
+
+    const Eigen::Quaternion<T> q_fwd = q_next * q_curr.conjugate();
+    const Eigen::Matrix<T, 3, 1> t_fwd = t_next - (q_fwd * t_curr);
+
+    T aa_back[3];
+    EigenQuaternionToAngleAxis(q_back.coeffs().data(), aa_back);
+    T aa_fwd[3];
+    EigenQuaternionToAngleAxis(q_fwd.coeffs().data(), aa_fwd);
+
+    const T dt_ratio = T(dt_ratio_);
+    const T inv_sigma_rot = T(inv_sigma_rot_);
+    const T inv_sigma_trans = T(inv_sigma_trans_);
+
+    residuals_ptr[0] = inv_sigma_rot * (aa_fwd[0] - dt_ratio * aa_back[0]);
+    residuals_ptr[1] = inv_sigma_rot * (aa_fwd[1] - dt_ratio * aa_back[1]);
+    residuals_ptr[2] = inv_sigma_rot * (aa_fwd[2] - dt_ratio * aa_back[2]);
+    residuals_ptr[3] = inv_sigma_trans * (t_fwd.x() - dt_ratio * t_back.x());
+    residuals_ptr[4] = inv_sigma_trans * (t_fwd.y() - dt_ratio * t_back.y());
+    residuals_ptr[5] = inv_sigma_trans * (t_fwd.z() - dt_ratio * t_back.z());
+    return true;
+  }
+
+ private:
+  const double dt_ratio_;
+  const double inv_sigma_rot_;
+  const double inv_sigma_trans_;
+};
+
 }  // namespace colmap

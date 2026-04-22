@@ -221,5 +221,137 @@ TEST(CovarianceWeightedCostFunctor, AbsolutePosePositionPriorCostFunctor) {
               1e-6);
 }
 
+TEST(ConstantVelocityPriorCostFunctor, ZeroOnUniformDtScrewMotion) {
+  // Iterative chain: T_{k+1} = delta * T_k with fixed world-frame delta.
+  // This makes T_curr * Inverse(T_prev) constant for all k, so the
+  // twist-difference residual is exactly zero.
+  const double dt = 0.1;
+  const double sigma_rot = 0.01;
+  const double sigma_trans = 0.01;
+
+  const Eigen::Quaterniond q_step(Eigen::AngleAxisd(
+      0.05, Eigen::Vector3d(0.4, -0.8, 0.3).normalized()));
+  const Eigen::Vector3d t_step(0.03, -0.01, 0.005);
+  const Rigid3d delta(q_step, t_step);
+
+  const Rigid3d T_prev(
+      Eigen::Quaterniond(Eigen::AngleAxisd(
+          0.3, Eigen::Vector3d(0.7, -0.2, 0.1).normalized())),
+      Eigen::Vector3d(1.0, 2.0, -3.0));
+  const Rigid3d T_curr = delta * T_prev;
+  const Rigid3d T_next = delta * T_curr;
+
+  std::unique_ptr<ceres::CostFunction> cost_function(
+      ConstantVelocityPriorCostFunctor::Create(dt, dt, sigma_rot, sigma_trans));
+
+  const double* parameters[3] = {T_prev.params.data(),
+                                 T_curr.params.data(),
+                                 T_next.params.data()};
+  double residuals[6];
+  EXPECT_TRUE(cost_function->Evaluate(parameters, residuals, nullptr));
+  for (int i = 0; i < 6; ++i) {
+    EXPECT_NEAR(residuals[i], 0.0, 1e-10) << "component " << i;
+  }
+}
+
+TEST(ConstantVelocityPriorCostFunctor, ZeroOnNonUniformDtPureTranslation) {
+  // Non-uniform dt but pure translation (omega = 0) -> V = I, decoupled
+  // math is exact. delta_prev and delta_next scale linearly with dt.
+  const double dt_prev = 0.07;
+  const double dt_next = 0.21;
+  const double sigma_rot = 0.01;
+  const double sigma_trans = 0.01;
+
+  const Eigen::Vector3d vel(-0.5, 0.2, 0.0);
+  const Rigid3d delta_prev(Eigen::Quaterniond::Identity(), vel * dt_prev);
+  const Rigid3d delta_next(Eigen::Quaterniond::Identity(), vel * dt_next);
+
+  const Rigid3d T_prev(Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero());
+  const Rigid3d T_curr = delta_prev * T_prev;
+  const Rigid3d T_next = delta_next * T_curr;
+
+  std::unique_ptr<ceres::CostFunction> cost_function(
+      ConstantVelocityPriorCostFunctor::Create(
+          dt_prev, dt_next, sigma_rot, sigma_trans));
+
+  const double* parameters[3] = {T_prev.params.data(),
+                                 T_curr.params.data(),
+                                 T_next.params.data()};
+  double residuals[6];
+  EXPECT_TRUE(cost_function->Evaluate(parameters, residuals, nullptr));
+  for (int i = 0; i < 6; ++i) {
+    EXPECT_NEAR(residuals[i], 0.0, 1e-10) << "component " << i;
+  }
+}
+
+TEST(ConstantVelocityPriorCostFunctor, ZeroOnNonUniformDtPureRotation) {
+  // Non-uniform dt but pure rotation (translation = 0) -> decoupled math
+  // is exact. angle_axis scales linearly with dt.
+  const double dt_prev = 0.07;
+  const double dt_next = 0.21;
+  const double sigma_rot = 0.01;
+  const double sigma_trans = 0.01;
+
+  const Eigen::Vector3d omega(0.05, -0.08, 0.12);
+  const Eigen::Quaterniond q_prev(
+      Eigen::AngleAxisd(omega.norm() * dt_prev, omega.normalized()));
+  const Eigen::Quaterniond q_next(
+      Eigen::AngleAxisd(omega.norm() * dt_next, omega.normalized()));
+  const Rigid3d delta_prev(q_prev, Eigen::Vector3d::Zero());
+  const Rigid3d delta_next(q_next, Eigen::Vector3d::Zero());
+
+  const Rigid3d T_prev(Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero());
+  const Rigid3d T_curr = delta_prev * T_prev;
+  const Rigid3d T_next = delta_next * T_curr;
+
+  std::unique_ptr<ceres::CostFunction> cost_function(
+      ConstantVelocityPriorCostFunctor::Create(
+          dt_prev, dt_next, sigma_rot, sigma_trans));
+
+  const double* parameters[3] = {T_prev.params.data(),
+                                 T_curr.params.data(),
+                                 T_next.params.data()};
+  double residuals[6];
+  EXPECT_TRUE(cost_function->Evaluate(parameters, residuals, nullptr));
+  for (int i = 0; i < 6; ++i) {
+    EXPECT_NEAR(residuals[i], 0.0, 1e-10) << "component " << i;
+  }
+}
+
+TEST(ConstantVelocityPriorCostFunctor, NonzeroOnJerk) {
+  // Construct three poses where T_curr deviates from the uniform-velocity
+  // midpoint by a known translation. Residual must reflect that deviation,
+  // scaled by 1 / sigma.
+  const double dt = 0.1;
+  const double sigma_rot = 0.01;
+  const double sigma_trans = 0.02;
+
+  const Rigid3d T_prev(Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero());
+  // Uniform-velocity midpoint would be T_curr = (I, (1,0,0)).
+  // Perturb translation so that forward increment differs from backward by
+  // (+0.04, 0, 0). With dt_ratio = 1, residual_trans_x = -0.04 / sigma_trans * 2.
+  Rigid3d T_curr(Eigen::Quaterniond::Identity(),
+                 Eigen::Vector3d(1.0 - 0.02, 0.0, 0.0));
+  Rigid3d T_next(Eigen::Quaterniond::Identity(),
+                 Eigen::Vector3d(2.0 + 0.02, 0.0, 0.0));
+
+  std::unique_ptr<ceres::CostFunction> cost_function(
+      ConstantVelocityPriorCostFunctor::Create(dt, dt, sigma_rot, sigma_trans));
+
+  const double* parameters[3] = {T_prev.params.data(),
+                                 T_curr.params.data(),
+                                 T_next.params.data()};
+  double residuals[6];
+  EXPECT_TRUE(cost_function->Evaluate(parameters, residuals, nullptr));
+  // delta_back.t = (0.98, 0, 0); delta_fwd.t = (1.04, 0, 0)
+  // residual_trans_x = (1.04 - 0.98) / sigma_trans = 0.06 / 0.02 = 3.0
+  EXPECT_NEAR(residuals[0], 0.0, 1e-8);
+  EXPECT_NEAR(residuals[1], 0.0, 1e-8);
+  EXPECT_NEAR(residuals[2], 0.0, 1e-8);
+  EXPECT_NEAR(residuals[3], 3.0, 1e-6);
+  EXPECT_NEAR(residuals[4], 0.0, 1e-8);
+  EXPECT_NEAR(residuals[5], 0.0, 1e-8);
+}
+
 }  // namespace
 }  // namespace colmap

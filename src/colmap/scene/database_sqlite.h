@@ -33,7 +33,9 @@
 #include "colmap/geometry/rigid3.h"
 #include "colmap/scene/database.h"
 
+#include <cmath>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -56,11 +58,16 @@ struct SixDofPosePrior {
   PosePrior::CoordinateSystem coordinate_system =
 	  PosePrior::CoordinateSystem::UNDEFINED;
   Eigen::Vector3d gravity = Eigen::Vector3d::Constant(PosePrior::kNaN);
+  // Device timestamp in seconds (authoritative ordering for per-camera
+  // temporal chains). NaN when unknown; consumers needing temporal order
+  // must guard with HasTimestamp().
+  double timestamp = std::numeric_limits<double>::quiet_NaN();
 
   inline bool HasPose() const { return cam_from_world.params.allFinite(); }
   inline bool HasRotationCov() const { return rotation_covariance.allFinite(); }
   inline bool HasPositionCov() const { return position_covariance.allFinite(); }
   inline bool HasGravity() const { return gravity.allFinite(); }
+  inline bool HasTimestamp() const { return std::isfinite(timestamp); }
 };
 
 std::shared_ptr<Database> OpenSqliteDatabase(const std::filesystem::path& path);

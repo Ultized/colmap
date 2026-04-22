@@ -464,6 +464,13 @@ SixDofPosePrior ReadSixDofPosePriorRow(sqlite3_stmt* sql_stmt) {
       sqlite3_column_int64(sql_stmt, 8));
   }
 
+  // Optional 10th column (index 9) = timestamp. Older DBs without the column
+  // will have column_count == 9 and pose_prior.timestamp stays NaN.
+  if (sqlite3_column_count(sql_stmt) > 9 &&
+      sqlite3_column_type(sql_stmt, 9) != SQLITE_NULL) {
+    pose_prior.timestamp = sqlite3_column_double(sql_stmt, 9);
+  }
+
   return pose_prior;
 }
 
@@ -2592,9 +2599,30 @@ std::vector<SixDofPosePrior> ReadSixDofPosePriorsFromDatabase(
     return {};
   }
 
+  // Detect optional `timestamp` column via PRAGMA table_info, so databases
+  // written before the column was added still load cleanly.
+  bool has_timestamp_column = false;
+  {
+    sqlite3_stmt* pragma_stmt = nullptr;
+    const std::string pragma_query =
+        "PRAGMA table_info(" + QuoteSqlIdentifier(table_name) + ");";
+    SQLITE3_CALL(sqlite3_prepare_v2(
+        database, pragma_query.c_str(), -1, &pragma_stmt, nullptr));
+    while (SQLITE3_CALL(sqlite3_step(pragma_stmt)) == SQLITE_ROW) {
+      const char* col_name = reinterpret_cast<const char*>(
+          sqlite3_column_text(pragma_stmt, 1));
+      if (col_name != nullptr && std::string(col_name) == "timestamp") {
+        has_timestamp_column = true;
+        break;
+      }
+    }
+    finalize_stmt(pragma_stmt);
+  }
+
   const std::string query =
-      "SELECT image_id, image_name, camera_id, qvec, tvec, "
-      "rotation_covariance, position_covariance, gravity, coordinate_system "
+      std::string("SELECT image_id, image_name, camera_id, qvec, tvec, ") +
+      "rotation_covariance, position_covariance, gravity, coordinate_system" +
+      (has_timestamp_column ? ", timestamp " : " ") +
       "FROM " + QuoteSqlIdentifier(table_name) +
       " WHERE qvec IS NOT NULL AND tvec IS NOT NULL ORDER BY image_id;";
 

@@ -7,6 +7,19 @@ from typing import Literal
 
 import numpy as np
 import tyro
+
+# Work around broken colmap_data.__init__ import chain (pkg 0.1.0 pulls in
+# colmap_data.conversion.txt_colmap which does `from pointcloud import ...`
+# where `pointcloud` is not a valid module). Pre-register a stub so the eager
+# import succeeds; we only need symbols from colmap_data.io below.
+import sys as _sys
+import types as _types
+if "pointcloud" not in _sys.modules:
+    _stub = _types.ModuleType("pointcloud")
+    _stub.downsample_pointcloud = lambda *a, **kw: None  # type: ignore[attr-defined]
+    _stub.downsample_pointcloud_with_normals = lambda *a, **kw: None  # type: ignore[attr-defined]
+    _sys.modules["pointcloud"] = _stub
+
 from colmap_data import CAMERA_MODEL_NAMES, qvec2rotmat, read_model
 
 CAMERA_SENSOR_TYPE = 0
@@ -47,6 +60,7 @@ class MatchRecord:
     tvec: np.ndarray
     position: np.ndarray
     gravity: np.ndarray
+    timestamp: float | None = None
 
 
 @dataclass(frozen=True)
@@ -78,6 +92,62 @@ class Args:
     validate_image_files: bool = True
     fail_on_missing_images: bool = False
     overwrite_output: bool = False
+    # Optional sidecar file mapping image_name -> device timestamp (seconds).
+    # Either a JSON dict ({name: ts}) or an ImgPose.txt (path x y z rpy q ts).
+    # If omitted, auto-detect <sparse_model_path>/timestamps.json.
+    timestamps_path: Path | None = None
+
+
+def load_timestamps_sidecar(path: Path) -> dict[str, float]:
+    """Return {image_name -> timestamp_seconds} parsed from either a JSON
+    sidecar ({name: ts}) or an ImgPose.txt (path x y z rpy q ts)."""
+    if not path.is_file():
+        raise FileNotFoundError(f"timestamps_path does not exist: {path}")
+
+    text = path.read_text(encoding="utf-8").strip()
+    if not text:
+        return {}
+
+    # JSON branch: starts with '{' after stripping.
+    if text.lstrip().startswith("{"):
+        import json
+        raw = json.loads(text)
+        return {
+            str(k).replace("\\", "/"): float(v)
+            for k, v in raw.items()
+        }
+
+    # ImgPose.txt branch: whitespace-separated, 12 columns per row.
+    out: dict[str, float] = {}
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        parts = stripped.split()
+        if len(parts) < 12:
+            continue
+        name = parts[0].replace("\\", "/")
+        if "/" not in name:  # header row
+            continue
+        try:
+            out[name] = float(parts[11])
+        except ValueError:
+            continue
+    return out
+
+
+def resolve_timestamps(
+    explicit_path: Path | None,
+    sparse_model_path: Path,
+) -> dict[str, float]:
+    """Return timestamps dict if a sidecar is explicitly provided or can be
+    auto-discovered as <sparse_model_path>/timestamps.json; else empty."""
+    if explicit_path is not None:
+        return load_timestamps_sidecar(Path(explicit_path).resolve())
+    auto = sparse_model_path / "timestamps.json"
+    if auto.is_file():
+        return load_timestamps_sidecar(auto)
+    return {}
 
 
 def is_model_directory(path: Path) -> bool:
@@ -238,10 +308,12 @@ def build_matches(
     image_path: Path,
     validate_image_files: bool,
     fail_on_missing_images: bool,
+    timestamps_by_name: dict[str, float] | None = None,
 ) -> tuple[list[MatchRecord], list[str], list[str]]:
     matches: list[MatchRecord] = []
     unmatched_model_images: list[str] = []
     missing_image_files: list[str] = []
+    timestamps_by_name = timestamps_by_name or {}
 
     for model_image in model_images.values():
         image_name = str(model_image.name)
@@ -272,6 +344,7 @@ def build_matches(
                 tvec=tvec,
                 position=make_projection_center(qvec, tvec),
                 gravity=make_gravity_vector(qvec),
+                timestamp=timestamps_by_name.get(image_name),
             )
         )
 
@@ -384,9 +457,23 @@ def create_6dof_pose_table(connection: sqlite3.Connection) -> None:
         "  gravity BLOB,"
         "  coordinate_system INTEGER NOT NULL,"
         "  source_model_path TEXT NOT NULL,"
-        "  imported_at_utc TEXT NOT NULL"
+        "  imported_at_utc TEXT NOT NULL,"
+        "  timestamp REAL"
         ");"
     )
+    # Idempotent migration: old DBs created before the `timestamp` column
+    # existed still need the column. ADD COLUMN is idempotent only when
+    # guarded; check via PRAGMA table_info.
+    existing_cols = {
+        row[1]
+        for row in connection.execute(
+            f"PRAGMA table_info({table_name})"
+        ).fetchall()
+    }
+    if "timestamp" not in existing_cols:
+        connection.execute(
+            f"ALTER TABLE {table_name} ADD COLUMN timestamp REAL"
+        )
 
 
 def drop_legacy_6dof_pose_table(connection: sqlite3.Connection) -> None:
@@ -474,8 +561,8 @@ def upsert_6dof_pose_row(
         "camera_model, camera_model_name, width, height, camera_params, "
         "qvec, tvec, position, rotation_covariance, position_covariance, "
         "gravity, coordinate_system, "
-        "source_model_path, imported_at_utc"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "source_model_path, imported_at_utc, timestamp"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(image_id) DO UPDATE SET "
         "image_name = excluded.image_name, "
         "camera_id = excluded.camera_id, "
@@ -494,7 +581,8 @@ def upsert_6dof_pose_row(
         "gravity = excluded.gravity, "
         "coordinate_system = excluded.coordinate_system, "
         "source_model_path = excluded.source_model_path, "
-        "imported_at_utc = excluded.imported_at_utc",
+        "imported_at_utc = excluded.imported_at_utc, "
+        "timestamp = excluded.timestamp",
         (
             match.image_id,
             match.image_name,
@@ -518,6 +606,7 @@ def upsert_6dof_pose_row(
             coordinate_system,
             str(source_model_path),
             datetime.now(timezone.utc).isoformat(),
+            float(match.timestamp) if match.timestamp is not None else None,
         ),
     )
 
@@ -541,6 +630,8 @@ def import_lidar_priors(
     position_covariance = np.eye(3, dtype=np.float64) * (args.position_std**2)
     rotation_std_rad = np.deg2rad(args.rotation_std_deg)
     rotation_covariance = np.eye(3, dtype=np.float64) * (rotation_std_rad**2)
+    timestamps_by_name = resolve_timestamps(args.timestamps_path,
+                                            sparse_model_path)
 
     with sqlite3.connect(database_path) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
@@ -551,6 +642,7 @@ def import_lidar_priors(
             image_path=image_path,
             validate_image_files=args.validate_image_files,
             fail_on_missing_images=args.fail_on_missing_images,
+            timestamps_by_name=timestamps_by_name,
         )
 
         if not matches:
@@ -621,6 +713,13 @@ def import_lidar_priors(
 
         connection.commit()
 
+    num_matches_with_timestamp = sum(
+        1 for m in matches if m.timestamp is not None
+    )
+    print(
+        f"  timestamps loaded: {len(timestamps_by_name)} "
+        f"({num_matches_with_timestamp}/{len(matches)} matches linked)"
+    )
     stats = ImportStats(
         matched_images=len(matches),
         skipped_model_images=len(unmatched_model_images),

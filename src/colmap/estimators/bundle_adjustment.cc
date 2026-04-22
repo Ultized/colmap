@@ -213,6 +213,16 @@ BundleAdjustmentConfig::ConstantRigFromWorldPoses() const {
   return constant_rig_from_world_poses_;
 }
 
+void BundleAdjustmentConfig::SetTemporalSmoothnessTriplets(
+    std::vector<TemporalSmoothnessTriplet> t) {
+  temporal_smoothness_triplets_ = std::move(t);
+}
+
+const std::vector<TemporalSmoothnessTriplet>&
+BundleAdjustmentConfig::TemporalSmoothnessTriplets() const {
+  return temporal_smoothness_triplets_;
+}
+
 void BundleAdjustmentConfig::AddVariablePoint(const point3D_t point3D_id) {
   THROW_CHECK(!HasConstantPoint(point3D_id));
   variable_point3D_ids_.insert(point3D_id);
@@ -299,6 +309,13 @@ BundleAdjustmentBackendOptions& BundleAdjustmentBackendOptions::operator=(
 }
 
 bool BundleAdjustmentOptions::Check() const {
+  if (use_temporal_smoothness_prior) {
+    CHECK_OPTION_GT(temporal_smoothness_rotation_stddev_deg, 0);
+    CHECK_OPTION_GT(temporal_smoothness_translation_stddev_m, 0);
+    CHECK_OPTION_GT(temporal_smoothness_max_dt_ratio, 1.0);
+    CHECK_OPTION_GT(temporal_smoothness_max_dt_seconds, 0);
+    CHECK_OPTION_GE(temporal_smoothness_huber_threshold, 0);
+  }
   return THROW_CHECK_NOTNULL(ceres)->Check();
 }
 

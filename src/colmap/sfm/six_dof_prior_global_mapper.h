@@ -55,7 +55,12 @@ class SixDofPriorGlobalMapper : public PriorGlobalMapper {
       const PriorGlobalMapperOptions& mapper_options,
       const char* stage_name,
       const PosePriorBundleAdjustmentOptions& prior_options,
-      double prior_rotation_fallback_stddev_rad);
+      double prior_rotation_fallback_stddev_rad,
+      bool populate_temporal_triplets = false);
+
+  // Populate temporal_triplets_ from six_dof_pose_priors_. Called once in
+  // the constructor; grouped by sensor_id, sorted by timestamp.
+  void BuildTemporalTriplets();
 
   bool EstimateRobustMetricAlignmentTransform(
       const PriorGlobalMapperOptions& mapper_options,
@@ -121,6 +126,7 @@ class SixDofPriorGlobalMapper : public PriorGlobalMapper {
   std::vector<SixDofPosePrior> six_dof_pose_priors_;
   std::vector<AbsolutePosePriorConstraint> absolute_pose_priors_;
   std::unordered_map<image_t, const SixDofPosePrior*> image_to_six_dof_prior_;
+  std::vector<TemporalSmoothnessTriplet> temporal_triplets_;
   std::shared_ptr<const LidarPointCloud> lidar_cloud_;
   LidarMatchingOptions lidar_matching_options_;
   LidarBundleAdjustmentOptions lidar_ba_options_;
