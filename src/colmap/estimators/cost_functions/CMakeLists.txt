@@ -35,6 +35,7 @@ COLMAP_ADD_LIBRARY(
     SRCS
         alignment.h
         calibration.h
+        dead_zone_loss.h
         lidar.h
         manifold.h
         motion_averaging.h
@@ -77,6 +78,11 @@ COLMAP_ADD_TEST(
 COLMAP_ADD_TEST(
     NAME pose_prior_test
     SRCS pose_prior_test.cc
+    LINK_LIBS colmap_estimators_cost_functions
+)
+COLMAP_ADD_TEST(
+    NAME dead_zone_loss_test
+    SRCS dead_zone_loss_test.cc
     LINK_LIBS colmap_estimators_cost_functions
 )
 COLMAP_ADD_TEST(

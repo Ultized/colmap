@@ -198,6 +198,75 @@ TEST(RelativePosePriorCostFunctor, Nominal) {
   EXPECT_NEAR(residuals[5], 2, 1e-6);
 }
 
+TEST(ScaledRelativePosePriorCostFunctor, ZeroResidualAtPrior) {
+  Rigid3d i_from_j_prior(Eigen::Quaterniond::Identity(),
+                         Eigen::Vector3d(0, 0, -1));
+  const double sigma_rot_rad = DegToRad(0.5);
+  const double sigma_trans_m = 0.01;
+  std::unique_ptr<ceres::CostFunction> cost_function(
+      ScaledRelativePosePriorCostFunctor::Create(
+          i_from_j_prior, sigma_rot_rad, sigma_trans_m));
+
+  double i_from_world[7] = {0, 0, 0, 1, 0, 0, 0};
+  double j_from_world[7] = {0, 0, 0, 1, 0, 0, 1};
+  double residuals[6];
+  const double* parameters[2] = {i_from_world, j_from_world};
+  EXPECT_TRUE(cost_function->Evaluate(parameters, residuals, nullptr));
+  for (int k = 0; k < 6; ++k) {
+    EXPECT_NEAR(residuals[k], 0.0, 1e-12);
+  }
+}
+
+TEST(ScaledRelativePosePriorCostFunctor, TranslationScaledByInvSigma) {
+  Rigid3d i_from_j_prior(Eigen::Quaterniond::Identity(),
+                         Eigen::Vector3d(0, 0, -1));
+  const double sigma_rot_rad = DegToRad(0.5);
+  const double sigma_trans_m = 0.01;
+  std::unique_ptr<ceres::CostFunction> cost_function(
+      ScaledRelativePosePriorCostFunctor::Create(
+          i_from_j_prior, sigma_rot_rad, sigma_trans_m));
+
+  // Same setup as RelativePosePriorCostFunctor::Nominal's 2nd branch:
+  // raw translation residual is 4m along z. Expect scaled = 4 / sigma_trans.
+  double i_from_world[7] = {0, 0, 0, 1, 0, 0, 4};
+  double j_from_world[7] = {0, 0, 0, 1, 0, 0, 1};
+  double residuals[6];
+  const double* parameters[2] = {i_from_world, j_from_world};
+  EXPECT_TRUE(cost_function->Evaluate(parameters, residuals, nullptr));
+  EXPECT_NEAR(residuals[0], 0.0, 1e-12);
+  EXPECT_NEAR(residuals[1], 0.0, 1e-12);
+  EXPECT_NEAR(residuals[2], 0.0, 1e-12);
+  EXPECT_NEAR(residuals[3], 0.0, 1e-12);
+  EXPECT_NEAR(residuals[4], 0.0, 1e-12);
+  EXPECT_NEAR(residuals[5], 4.0 / sigma_trans_m, 1e-9);
+}
+
+TEST(ScaledRelativePosePriorCostFunctor, RotationScaledByInvSigma) {
+  Rigid3d i_from_j_prior(Eigen::Quaterniond::Identity(),
+                         Eigen::Vector3d(0, 0, -1));
+  const double sigma_rot_rad = DegToRad(0.5);
+  const double sigma_trans_m = 0.01;
+  std::unique_ptr<ceres::CostFunction> cost_function(
+      ScaledRelativePosePriorCostFunctor::Create(
+          i_from_j_prior, sigma_rot_rad, sigma_trans_m));
+
+  // Same setup as RelativePosePriorCostFunctor::Nominal's 4th branch:
+  // j rotated 90deg around Y. Expect raw rotation residual DegToRad(-90),
+  // scaled by inv_sigma_rot.
+  double i_from_world[7] = {0, 0, 0, 1, 0, 0, 0};
+  double j_from_world[7] = {0, 0, 0, 1, 0, 0, 1};
+  Eigen::Matrix3d rotation_matrix;
+  rotation_matrix << 0, 0, 1, 0, 1, 0, -1, 0, 0;
+  Eigen::Map<Eigen::Quaterniond>(static_cast<double*>(j_from_world)) =
+      rotation_matrix;
+  double residuals[6];
+  const double* parameters[2] = {i_from_world, j_from_world};
+  EXPECT_TRUE(cost_function->Evaluate(parameters, residuals, nullptr));
+  EXPECT_NEAR(residuals[0], 0.0, 1e-6);
+  EXPECT_NEAR(residuals[1], DegToRad(-90.0) / sigma_rot_rad, 1e-6);
+  EXPECT_NEAR(residuals[2], 0.0, 1e-6);
+}
+
 TEST(CovarianceWeightedCostFunctor, AbsolutePosePositionPriorCostFunctor) {
   const Rigid3d cam_from_world(Eigen::Quaterniond::UnitRandom(),
                                Eigen::Vector3d::Random());

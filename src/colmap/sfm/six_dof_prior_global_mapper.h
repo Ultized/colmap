@@ -62,6 +62,22 @@ class SixDofPriorGlobalMapper : public PriorGlobalMapper {
   // the constructor; grouped by sensor_id, sorted by timestamp.
   void BuildTemporalTriplets();
 
+  // Populate rig_pairs_ by splitting priors on image-name prefix, sorting
+  // each side by timestamp and matching by nearest-time. Reconstruction runs
+  // that do not enable use_rig_pair_prior still pay only the O(n log n)
+  // construction cost. Called on demand from Solve() when the rig pair prior
+  // is enabled; the resulting pairs are later forwarded into each
+  // BundleAdjustmentConfig via SetRigPairs.
+  void BuildRigPairs(const std::string& i_prefix,
+                     const std::string& j_prefix,
+                     double max_dt_seconds);
+
+  // Estimate rig_pair_baseline_ (i_from_j) by robustly averaging the
+  // corresponding relative pose across all built rig_pairs_. Called only
+  // when BuildRigPairs produced at least one pair and the user has not
+  // supplied an explicit override.
+  void EstimateRigBaseline();
+
   bool EstimateRobustMetricAlignmentTransform(
       const PriorGlobalMapperOptions& mapper_options,
       const char* stage_name,
@@ -127,6 +143,9 @@ class SixDofPriorGlobalMapper : public PriorGlobalMapper {
   std::vector<AbsolutePosePriorConstraint> absolute_pose_priors_;
   std::unordered_map<image_t, const SixDofPosePrior*> image_to_six_dof_prior_;
   std::vector<TemporalSmoothnessTriplet> temporal_triplets_;
+  std::vector<RigPairCorrespondence> rig_pairs_;
+  Rigid3d rig_pair_baseline_;
+  bool rig_pair_baseline_ready_ = false;
   std::shared_ptr<const LidarPointCloud> lidar_cloud_;
   LidarMatchingOptions lidar_matching_options_;
   LidarBundleAdjustmentOptions lidar_ba_options_;

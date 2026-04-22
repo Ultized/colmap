@@ -1087,6 +1087,166 @@ void SixDofPriorGlobalMapper::BuildTemporalTriplets() {
             << " triplet(s) across " << by_sensor.size() << " camera(s).";
 }
 
+namespace {
+
+bool StartsWith(const std::string& s, const std::string& prefix) {
+  return s.size() >= prefix.size() &&
+         std::equal(prefix.begin(), prefix.end(), s.begin());
+}
+
+}  // namespace
+
+void SixDofPriorGlobalMapper::BuildRigPairs(const std::string& i_prefix,
+                                            const std::string& j_prefix,
+                                            double max_dt_seconds) {
+  rig_pairs_.clear();
+  rig_pair_baseline_ready_ = false;
+
+  std::vector<const SixDofPosePrior*> group_i;
+  std::vector<const SixDofPosePrior*> group_j;
+  size_t num_without_ts = 0;
+  for (const auto& pp : six_dof_pose_priors_) {
+    if (pp.corr_data_id.sensor_id.type != SensorType::CAMERA) {
+      continue;
+    }
+    if (!pp.HasTimestamp()) {
+      ++num_without_ts;
+      continue;
+    }
+    if (StartsWith(pp.image_name, i_prefix)) {
+      group_i.push_back(&pp);
+    } else if (StartsWith(pp.image_name, j_prefix)) {
+      group_j.push_back(&pp);
+    }
+  }
+  if (num_without_ts > 0) {
+    LOG(WARNING) << "Rig pair: " << num_without_ts
+                 << " pose prior(s) lack timestamps and will not contribute "
+                    "to rig pairing.";
+  }
+  if (group_i.empty() || group_j.empty()) {
+    LOG(WARNING) << "Rig pair: side counts i=" << group_i.size()
+                 << " j=" << group_j.size()
+                 << " — no pairs built (check i_prefix=\"" << i_prefix
+                 << "\" / j_prefix=\"" << j_prefix << "\").";
+    return;
+  }
+
+  auto ts_less = [](const SixDofPosePrior* a, const SixDofPosePrior* b) {
+    return a->timestamp < b->timestamp;
+  };
+  std::sort(group_i.begin(), group_i.end(), ts_less);
+  std::sort(group_j.begin(), group_j.end(), ts_less);
+
+  size_t num_filtered_dt = 0;
+  for (const SixDofPosePrior* pi : group_i) {
+    auto it = std::lower_bound(
+        group_j.begin(), group_j.end(), pi->timestamp,
+        [](const SixDofPosePrior* a, double t) { return a->timestamp < t; });
+    const SixDofPosePrior* best = nullptr;
+    double best_abs_dt = std::numeric_limits<double>::infinity();
+    if (it != group_j.end()) {
+      const double dt = std::abs((*it)->timestamp - pi->timestamp);
+      if (dt < best_abs_dt) {
+        best = *it;
+        best_abs_dt = dt;
+      }
+    }
+    if (it != group_j.begin()) {
+      auto prev = std::prev(it);
+      const double dt = std::abs((*prev)->timestamp - pi->timestamp);
+      if (dt < best_abs_dt) {
+        best = *prev;
+        best_abs_dt = dt;
+      }
+    }
+    if (best == nullptr) {
+      continue;
+    }
+    if (max_dt_seconds > 0.0 && best_abs_dt > max_dt_seconds) {
+      ++num_filtered_dt;
+      continue;
+    }
+    RigPairCorrespondence pair;
+    pair.i_image_id = static_cast<image_t>(pi->corr_data_id.id);
+    pair.j_image_id = static_cast<image_t>(best->corr_data_id.id);
+    pair.dt = best->timestamp - pi->timestamp;
+    rig_pairs_.push_back(pair);
+  }
+
+  LOG(INFO) << "Rig pair: built " << rig_pairs_.size()
+            << " pair(s) from i=" << group_i.size()
+            << " / j=" << group_j.size() << " priors; dropped "
+            << num_filtered_dt << " with |dt| > " << max_dt_seconds << "s.";
+}
+
+void SixDofPriorGlobalMapper::EstimateRigBaseline() {
+  rig_pair_baseline_ready_ = false;
+  if (rig_pairs_.empty()) {
+    return;
+  }
+
+  // Gather i_from_j = cam_i_from_world * cam_j_from_world^{-1} across all
+  // pairs. Use the prior poses (not the live reconstruction) so the baseline
+  // is independent of the current BA iterate.
+  std::vector<Eigen::Vector3d> translations;
+  std::vector<Eigen::Quaterniond> rotations;
+  translations.reserve(rig_pairs_.size());
+  rotations.reserve(rig_pairs_.size());
+  for (const auto& pair : rig_pairs_) {
+    const auto it_i = image_to_six_dof_prior_.find(pair.i_image_id);
+    const auto it_j = image_to_six_dof_prior_.find(pair.j_image_id);
+    if (it_i == image_to_six_dof_prior_.end() ||
+        it_j == image_to_six_dof_prior_.end()) {
+      continue;
+    }
+    const Rigid3d& i_from_w = it_i->second->cam_from_world;
+    const Rigid3d& j_from_w = it_j->second->cam_from_world;
+    const Rigid3d i_from_j = i_from_w * Inverse(j_from_w);
+    translations.push_back(i_from_j.translation());
+    Eigen::Quaterniond q = i_from_j.rotation();
+    q.normalize();
+    rotations.push_back(q);
+  }
+  if (translations.empty()) {
+    LOG(WARNING) << "Rig pair baseline: no usable prior pairs.";
+    return;
+  }
+
+  // Component-wise median translation (robust to outliers).
+  auto median_component = [&](int axis) {
+    std::vector<double> v;
+    v.reserve(translations.size());
+    for (const auto& t : translations) v.push_back(t[axis]);
+    const size_t mid = v.size() / 2;
+    std::nth_element(v.begin(), v.begin() + mid, v.end());
+    return v[mid];
+  };
+  Eigen::Vector3d t_med(
+      median_component(0), median_component(1), median_component(2));
+
+  // Rotation average: pick the quaternion closest (by chordal distance) to
+  // the first one's hemisphere, then average, normalize.
+  const Eigen::Quaterniond q_ref = rotations.front();
+  Eigen::Vector4d q_sum(0, 0, 0, 0);
+  for (const auto& q : rotations) {
+    const double sign = (q.dot(q_ref) >= 0.0) ? 1.0 : -1.0;
+    q_sum += sign * Eigen::Vector4d(q.x(), q.y(), q.z(), q.w());
+  }
+  q_sum.normalize();
+  Eigen::Quaterniond q_avg(q_sum[3], q_sum[0], q_sum[1], q_sum[2]);
+  q_avg.normalize();
+
+  rig_pair_baseline_ = Rigid3d(q_avg, t_med);
+  rig_pair_baseline_ready_ = true;
+
+  const double deg = 2.0 * std::acos(std::min(1.0, std::abs(q_avg.w()))) *
+                     180.0 / M_PI;
+  LOG(INFO) << "Rig pair baseline (" << rig_pairs_.size()
+            << " prior pairs): t=(" << t_med.transpose()
+            << "), |r|=" << deg << " deg.";
+}
+
 bool SixDofPriorGlobalMapper::ShouldUseSixDofPosePriors(
     const PriorGlobalMapperOptions& options) const {
   if (!options.use_6dof_pose_priors) {
@@ -1869,6 +2029,27 @@ bool SixDofPriorGlobalMapper::RunSixDofBundleAdjustment(
     ba_config.SetTemporalSmoothnessTriplets(std::move(eligible));
   }
 
+  if (ba_options.use_rig_pair_prior && !rig_pairs_.empty() &&
+      rig_pair_baseline_ready_) {
+    std::vector<RigPairCorrespondence> eligible;
+    eligible.reserve(rig_pairs_.size());
+    size_t num_skipped_unregistered = 0;
+    for (const auto& pair : rig_pairs_) {
+      if (!ba_config.HasImage(pair.i_image_id) ||
+          !ba_config.HasImage(pair.j_image_id)) {
+        ++num_skipped_unregistered;
+        continue;
+      }
+      eligible.push_back(pair);
+    }
+    LOG(INFO) << "Rig pair prior at " << stage_name << ": "
+              << eligible.size() << " eligible / " << rig_pairs_.size()
+              << " total pairs; skipped " << num_skipped_unregistered
+              << " unregistered.";
+    ba_config.SetRigPairBaseline(rig_pair_baseline_);
+    ba_config.SetRigPairs(std::move(eligible));
+  }
+
   auto ba = CreateAbsolutePosePriorBundleAdjuster(ba_options,
                                                   prior_options,
                                                   prior_rotation_fallback_stddev_rad,
@@ -2356,6 +2537,34 @@ bool SixDofPriorGlobalMapper::Solve(const PriorGlobalMapperOptions& options) {
   const double prior_rotation_fallback_stddev_rad =
       DegToRad(opts.six_dof_prior_rotation_stddev_deg);
   google::FlushLogFiles(google::GLOG_INFO);
+
+  // Build rig pairs once per Solve() call. They are forwarded into every BA
+  // stage through BundleAdjustmentConfig::SetRigPairs; the corresponding
+  // BundleAdjustmentOptions.use_rig_pair_prior flag gates whether residuals
+  // are actually added.
+  BuildRigPairs(opts.rig_pair_i_prefix,
+                opts.rig_pair_j_prefix,
+                opts.rig_pair_max_dt_seconds);
+  if (!rig_pairs_.empty()) {
+    if (!opts.rig_pair_baseline_override.empty()) {
+      std::istringstream iss(opts.rig_pair_baseline_override);
+      double qx, qy, qz, qw, tx, ty, tz;
+      if (iss >> qx >> qy >> qz >> qw >> tx >> ty >> tz) {
+        Eigen::Quaterniond q(qw, qx, qy, qz);
+        q.normalize();
+        rig_pair_baseline_ = Rigid3d(q, Eigen::Vector3d(tx, ty, tz));
+        rig_pair_baseline_ready_ = true;
+        LOG(INFO) << "Rig pair baseline overridden by CLI.";
+      } else {
+        LOG(WARNING) << "Rig pair baseline override failed to parse: \""
+                     << opts.rig_pair_baseline_override
+                     << "\" — falling back to auto-estimate.";
+        EstimateRigBaseline();
+      }
+    } else {
+      EstimateRigBaseline();
+    }
+  }
 
   if (use_6dof) {
     LOG(INFO) << "SixDofPriorGlobalMapper: full 6DoF priors ENABLED ("

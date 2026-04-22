@@ -524,6 +524,17 @@ void OptionManager::AddBundleAdjustmentOptions() {
   AddDefaultOption(
       "BundleAdjustment.temporal_smoothness_huber_threshold",
       &bundle_adjustment->temporal_smoothness_huber_threshold);
+  AddDefaultOption("BundleAdjustment.use_rig_pair_prior",
+                   &bundle_adjustment->use_rig_pair_prior);
+  AddDefaultOption(
+      "BundleAdjustment.rig_pair_rotation_stddev_deg",
+      &bundle_adjustment->rig_pair_rotation_stddev_deg);
+  AddDefaultOption(
+      "BundleAdjustment.rig_pair_translation_stddev_m",
+      &bundle_adjustment->rig_pair_translation_stddev_m);
+  AddDefaultOption(
+      "BundleAdjustment.rig_pair_dead_zone_threshold",
+      &bundle_adjustment->rig_pair_dead_zone_threshold);
 
   // Ceres-specific options
   AddDefaultOption(
@@ -795,6 +806,20 @@ void OptionManager::AddGlobalMapperOptions() {
       "GlobalMapper.ba_temporal_smoothness_huber_threshold",
       &global_mapper->mapper.bundle_adjustment
            .temporal_smoothness_huber_threshold);
+  AddDefaultOption(
+      "GlobalMapper.ba_use_rig_pair_prior",
+      &global_mapper->mapper.bundle_adjustment.use_rig_pair_prior);
+  AddDefaultOption(
+      "GlobalMapper.ba_rig_pair_rotation_stddev_deg",
+      &global_mapper->mapper.bundle_adjustment.rig_pair_rotation_stddev_deg);
+  AddDefaultOption(
+      "GlobalMapper.ba_rig_pair_translation_stddev_m",
+      &global_mapper->mapper.bundle_adjustment
+           .rig_pair_translation_stddev_m);
+  AddDefaultOption(
+      "GlobalMapper.ba_rig_pair_dead_zone_threshold",
+      &global_mapper->mapper.bundle_adjustment
+           .rig_pair_dead_zone_threshold);
   // Bundle adjustment options (Ceres-specific).
   AddDefaultOption("GlobalMapper.ba_ceres_use_gpu",
                    &global_mapper->mapper.bundle_adjustment.ceres->use_gpu);
@@ -879,6 +904,14 @@ void OptionManager::AddGlobalMapperOptions() {
   AddDefaultOption("GlobalMapper.lidar_retriangulation_max_reprojection_error",
                    &global_mapper->mapper
                         .lidar_retriangulation_max_reprojection_error);
+  AddDefaultOption("GlobalMapper.rig_pair_i_prefix",
+                   &global_mapper->mapper.rig_pair_i_prefix);
+  AddDefaultOption("GlobalMapper.rig_pair_j_prefix",
+                   &global_mapper->mapper.rig_pair_j_prefix);
+  AddDefaultOption("GlobalMapper.rig_pair_max_dt_seconds",
+                   &global_mapper->mapper.rig_pair_max_dt_seconds);
+  AddDefaultOption("GlobalMapper.rig_pair_baseline_override",
+                   &global_mapper->mapper.rig_pair_baseline_override);
 }
 
 void OptionManager::AddGravityRefinerOptions() {

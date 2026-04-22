@@ -100,6 +100,17 @@ struct TemporalSmoothnessTriplet {
   double dt_next = 0.0;
 };
 
+// Pairing of two near-simultaneous images from a time-unsynced multi-camera
+// rig. The i-th camera captured at time t_i; the j-th camera captured at time
+// t_j with |t_i - t_j| < rig_pair_max_dt_seconds. The rig extrinsic
+// i_from_j_baseline is assumed approximately constant across all pairs; the
+// dead-zone loss wrapped around the residual absorbs intra-dt rig motion.
+struct RigPairCorrespondence {
+  image_t i_image_id = kInvalidImageId;
+  image_t j_image_id = kInvalidImageId;
+  double dt = 0.0;
+};
+
 // Configuration container to setup bundle adjustment problems.
 class BundleAdjustmentConfig {
  public:
@@ -171,6 +182,16 @@ class BundleAdjustmentConfig {
   const std::vector<TemporalSmoothnessTriplet>&
   TemporalSmoothnessTriplets() const;
 
+  // Runtime-built list of rig pairs with a shared extrinsic prior. Empty
+  // unless the caller has computed timestamp-matched left/right pairs and
+  // estimated the baseline i_from_j. When non-empty and the corresponding
+  // BundleAdjustmentOptions flag is enabled, BA adds one soft relative-pose
+  // residual per pair.
+  void SetRigPairs(std::vector<RigPairCorrespondence> pairs);
+  const std::vector<RigPairCorrespondence>& RigPairs() const;
+  void SetRigPairBaseline(const Rigid3d& i_from_j_baseline);
+  const Rigid3d& RigPairBaseline() const;
+
  private:
   BundleAdjustmentGauge fixed_gauge_ = BundleAdjustmentGauge::UNSPECIFIED;
   std::unordered_set<camera_t> constant_cam_intrinsics_;
@@ -181,6 +202,8 @@ class BundleAdjustmentConfig {
   std::unordered_set<sensor_t> constant_sensor_from_rig_poses_;
   std::unordered_set<frame_t> constant_rig_from_world_poses_;
   std::vector<TemporalSmoothnessTriplet> temporal_smoothness_triplets_;
+  std::vector<RigPairCorrespondence> rig_pairs_;
+  Rigid3d rig_pair_baseline_;
 };
 
 struct BundleAdjustmentBackendOptions {
@@ -242,6 +265,21 @@ struct BundleAdjustmentOptions : public BundleAdjustmentBackendOptions {
   double temporal_smoothness_max_dt_seconds = 2.0;
   // Huber cutoff (in units of normalized residual). 0 disables Huber.
   double temporal_smoothness_huber_threshold = 3.0;
+
+  // Enable the soft rig-extrinsic prior. When true and
+  // BundleAdjustmentConfig::RigPairs() is non-empty, BA adds one whitened
+  // relative-pose residual per (i_image_id, j_image_id) pair, wrapped with a
+  // dead-zone loss so that small deviations within the configured tolerance
+  // are not penalized.
+  bool use_rig_pair_prior = false;
+  // Per-axis Gaussian stddev for the rotation part of the rig pair residual
+  // (deg) and the translation part (m). Used to whiten the 6D residual before
+  // it enters the dead-zone loss.
+  double rig_pair_rotation_stddev_deg = 0.5;
+  double rig_pair_translation_stddev_m = 0.01;
+  // Dead-zone radius, in units of normalized residual L2 norm. 0 reduces to
+  // standard L2 (weighted by the two stddevs above).
+  double rig_pair_dead_zone_threshold = 1.0;
 
   // Whether to print a final summary.
   bool print_summary = true;

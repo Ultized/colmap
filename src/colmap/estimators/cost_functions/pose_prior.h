@@ -221,6 +221,68 @@ struct RelativePosePriorCostFunctor
   const Rigid3d j_from_i_prior_;
 };
 
+// Same residual as RelativePosePriorCostFunctor but with separate Gaussian
+// scaling on the rotation and translation components. Intended for soft rig
+// extrinsic priors where rotation and translation deviations have different
+// physical tolerances (e.g. radians vs. meters) and must be combined into one
+// whitened 6D residual that can be further wrapped with a robust / dead-zone
+// loss kernel.
+//
+// Parameter blocks are Rigid3d-layout (qx, qy, qz, qw, tx, ty, tz), both
+// cam_from_world (or rig_from_world) poses expressed in the same world frame.
+// The prior captures the approximately static transform i_from_j_prior between
+// them (e.g. right_from_left rig baseline). residual[0..2] is the rotation
+// error expressed in angle-axis form, divided by sigma_rot_rad; residual[3..5]
+// is the translation error in the i-frame, divided by sigma_trans_m.
+struct ScaledRelativePosePriorCostFunctor
+    : public AutoDiffCostFunctor<ScaledRelativePosePriorCostFunctor,
+                                 6,
+                                 7,
+                                 7> {
+ public:
+  ScaledRelativePosePriorCostFunctor(const Rigid3d& i_from_j_prior,
+                                     double sigma_rot_rad,
+                                     double sigma_trans_m)
+      : j_from_i_prior_(Inverse(i_from_j_prior)),
+        inv_sigma_rot_(1.0 / sigma_rot_rad),
+        inv_sigma_trans_(1.0 / sigma_trans_m) {}
+
+  template <typename T>
+  bool operator()(const T* const i_from_world,
+                  const T* const j_from_world,
+                  T* residuals_ptr) const {
+    const Eigen::Quaternion<T> i_from_j_rotation =
+        EigenQuaternionMap<T>(i_from_world) *
+        EigenQuaternionMap<T>(j_from_world).inverse();
+    const Eigen::Quaternion<T> param_from_prior_rotation =
+        i_from_j_rotation * j_from_i_prior_.rotation().template cast<T>();
+    T aa[3];
+    EigenQuaternionToAngleAxis(param_from_prior_rotation.coeffs().data(), aa);
+
+    const Eigen::Matrix<T, 3, 1> j_from_i_prior_translation =
+        j_from_i_prior_.translation().cast<T>() -
+        EigenVector3Map<T>(j_from_world + 4);
+    const Eigen::Matrix<T, 3, 1> translation_residual =
+        EigenVector3Map<T>(i_from_world + 4) +
+        i_from_j_rotation * j_from_i_prior_translation;
+
+    const T inv_sigma_rot = T(inv_sigma_rot_);
+    const T inv_sigma_trans = T(inv_sigma_trans_);
+    residuals_ptr[0] = inv_sigma_rot * aa[0];
+    residuals_ptr[1] = inv_sigma_rot * aa[1];
+    residuals_ptr[2] = inv_sigma_rot * aa[2];
+    residuals_ptr[3] = inv_sigma_trans * translation_residual.x();
+    residuals_ptr[4] = inv_sigma_trans * translation_residual.y();
+    residuals_ptr[5] = inv_sigma_trans * translation_residual.z();
+    return true;
+  }
+
+ private:
+  const Rigid3d j_from_i_prior_;
+  const double inv_sigma_rot_;
+  const double inv_sigma_trans_;
+};
+
 // Constant-velocity / zero-acceleration prior on three temporally adjacent
 // camera poses from the same sensor. The residual compares the forward
 // inter-frame twist with the (dt-scaled) backward inter-frame twist; it is

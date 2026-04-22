@@ -30,6 +30,7 @@
 #include "colmap/estimators/bundle_adjustment_ceres.h"
 
 #include "colmap/estimators/alignment.h"
+#include "colmap/estimators/cost_functions/dead_zone_loss.h"
 #include "colmap/estimators/cost_functions/manifold.h"
 #include "colmap/estimators/cost_functions/pose_prior.h"
 #include "colmap/estimators/cost_functions/reprojection_error.h"
@@ -646,6 +647,7 @@ class DefaultBundleAdjuster : public CeresBundleAdjuster {
     }
 
     AddTemporalSmoothnessResidualsToProblem(reconstruction);
+    AddRigPairResidualsToProblem(reconstruction);
   }
 
   std::shared_ptr<BundleAdjustmentSummary> Solve() override {
@@ -953,10 +955,85 @@ class DefaultBundleAdjuster : public CeresBundleAdjuster {
               << num_skipped_same_frame << " same-frame.";
   }
 
+  void AddRigPairResidualsToProblem(Reconstruction& reconstruction) {
+    if (!options_.use_rig_pair_prior) {
+      return;
+    }
+    const auto& pairs = config_.RigPairs();
+    if (pairs.empty()) {
+      return;
+    }
+
+    constexpr double kRadiansPerDegree = 0.01745329251994329577;
+    const double sigma_rot_rad =
+        options_.rig_pair_rotation_stddev_deg * kRadiansPerDegree;
+    const double sigma_trans_m = options_.rig_pair_translation_stddev_m;
+
+    if (options_.rig_pair_dead_zone_threshold > 0.0) {
+      rig_pair_loss_function_ = std::make_unique<DeadZoneLoss>(
+          options_.rig_pair_dead_zone_threshold);
+    }
+    ceres::LossFunction* loss_ptr = rig_pair_loss_function_.get();
+
+    const Rigid3d& baseline = config_.RigPairBaseline();
+
+    int num_added = 0;
+    int num_skipped_missing = 0;
+    int num_skipped_const = 0;
+    int num_skipped_same_frame = 0;
+    for (const auto& p : pairs) {
+      if (!reconstruction.ExistsImage(p.i_image_id) ||
+          !reconstruction.ExistsImage(p.j_image_id)) {
+        ++num_skipped_missing;
+        continue;
+      }
+      Image& img_i = reconstruction.Image(p.i_image_id);
+      Image& img_j = reconstruction.Image(p.j_image_id);
+      if (!img_i.HasFramePtr() || !img_j.HasFramePtr()) {
+        ++num_skipped_missing;
+        continue;
+      }
+      if (!config_.HasImage(p.i_image_id) ||
+          !config_.HasImage(p.j_image_id)) {
+        ++num_skipped_missing;
+        continue;
+      }
+
+      double* p_i = img_i.FramePtr()->RigFromWorld().params.data();
+      double* p_j = img_j.FramePtr()->RigFromWorld().params.data();
+
+      if (p_i == p_j) {
+        ++num_skipped_same_frame;
+        continue;
+      }
+      if (!problem_->HasParameterBlock(p_i) ||
+          !problem_->HasParameterBlock(p_j) ||
+          problem_->IsParameterBlockConstant(p_i) ||
+          problem_->IsParameterBlockConstant(p_j)) {
+        ++num_skipped_const;
+        continue;
+      }
+
+      problem_->AddResidualBlock(
+          ScaledRelativePosePriorCostFunctor::Create(
+              baseline, sigma_rot_rad, sigma_trans_m),
+          loss_ptr,
+          p_i,
+          p_j);
+      ++num_added;
+    }
+
+    LOG(INFO) << "Rig pair prior: added " << num_added
+              << " residual(s); skipped " << num_skipped_missing
+              << " missing, " << num_skipped_const << " constant, "
+              << num_skipped_same_frame << " same-frame.";
+  }
+
  private:
   std::shared_ptr<ceres::Problem> problem_;
   std::unique_ptr<ceres::LossFunction> loss_function_;
   std::unique_ptr<ceres::LossFunction> temporal_loss_function_;
+  std::unique_ptr<ceres::LossFunction> rig_pair_loss_function_;
 
   std::set<camera_t> parameterized_camera_ids_;
   std::set<image_t> parameterized_image_ids_;

@@ -234,6 +234,23 @@ struct PriorGlobalMapperOptions : public GlobalMapperOptions {
   // are overridden at runtime based on use_robust_loss_on_prior_position and
   // prior_position_loss_scale.
   PosePriorBundleAdjustmentOptions pose_prior_ba;
+
+  // Rig pair prior (time-unsynced multi-camera rig). These are the pair
+  // construction parameters used by SixDofPriorGlobalMapper::BuildRigPairs().
+  // The BA-side scaling and dead-zone parameters live on
+  // BundleAdjustmentOptions so they can be shared by all BA stages.
+  //
+  // Image prefixes that partition the pose priors into the "i" and "j"
+  // sensors of the rig (typically "left/" and "right/"). Pairs are formed
+  // between one image from each group whose timestamps lie within
+  // rig_pair_max_dt_seconds of each other.
+  std::string rig_pair_i_prefix = "left/";
+  std::string rig_pair_j_prefix = "right/";
+  double rig_pair_max_dt_seconds = 0.05;
+  // Space-separated 7 doubles "qx qy qz qw tx ty tz" expressing the i_from_j
+  // rig baseline. Empty means "estimate automatically from the priors"
+  // (median translation + quaternion average).
+  std::string rig_pair_baseline_override;
 };
 
 // GlobalMapper subclass that injects GPS/pose-prior constraints into:

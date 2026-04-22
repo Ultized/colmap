@@ -223,6 +223,25 @@ BundleAdjustmentConfig::TemporalSmoothnessTriplets() const {
   return temporal_smoothness_triplets_;
 }
 
+void BundleAdjustmentConfig::SetRigPairs(
+    std::vector<RigPairCorrespondence> pairs) {
+  rig_pairs_ = std::move(pairs);
+}
+
+const std::vector<RigPairCorrespondence>& BundleAdjustmentConfig::RigPairs()
+    const {
+  return rig_pairs_;
+}
+
+void BundleAdjustmentConfig::SetRigPairBaseline(
+    const Rigid3d& i_from_j_baseline) {
+  rig_pair_baseline_ = i_from_j_baseline;
+}
+
+const Rigid3d& BundleAdjustmentConfig::RigPairBaseline() const {
+  return rig_pair_baseline_;
+}
+
 void BundleAdjustmentConfig::AddVariablePoint(const point3D_t point3D_id) {
   THROW_CHECK(!HasConstantPoint(point3D_id));
   variable_point3D_ids_.insert(point3D_id);
