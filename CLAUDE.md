@@ -14,9 +14,45 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 处理本仓库相关任务时，**先读 `AGENTS.md`**；本文件只补充它没覆盖的内容。
 
-## 本地环境（Windows + vcpkg）
+## 本地环境（双开发环境：Windows 主构建 + Linux 并行）
 
-开发机为 Windows 11 + bash（Git Bash / MSYS），路径形式 `D:/Code/Cpp/colmap`。依赖走 **vcpkg manifest**（`vcpkg.json` + `vcpkg-configuration.json`），CMake 构建类型以 `Release` 为主，开启 `IPO_ENABLED=ON` 时链接耗时显著。
+依赖走 **vcpkg manifest**（`vcpkg.json` + `vcpkg-configuration.json` + `.vcpkg-overlay/ports/`），CMake 构建类型以 `Release` 为主，generator 是 `Ninja Multi-Config`，开启 `IPO_ENABLED=ON` 时链接耗时显著。
+
+两个并列的 checkout，各自维护独立 `build/`：
+
+| 环境 | 路径 | 用途 |
+|------|------|------|
+| Windows 11 + Git Bash | `D:/Code/Cpp/colmap` | 主构建/调试，CUDA 走 vcpkg `cuda` 端口 |
+| Linux + zsh | `/data/wangzhaolong/Code/Cpp/colmap`、`/home/wangzhaolong/Code/Cpp/colmap` | 并行开发、阅读代码、Linux 上跑 ctest |
+
+⚠️ **Linux checkout 的 `build/` 可能是从 Windows 同步过来的镜像**：`build/CMakeCache.txt` 里 `VCPKG_INSTALLED_DIR` / `VCPKG_MANIFEST_DIR` 会硬编码 `D:/Code/Cpp/colmap/...`。**从 Linux 直接 `cmake --build build` 会立刻触发重配并失败**。Linux 上要么用独立的 `build-linux/`，要么先 `rm -rf build && cmake -S . -B build ...` 重新生成 Linux 自己的缓存。两个 OS 不要共享同一个 `build/`。
+
+### Linux 上跑通的实战配方（验证日期 2026-05-08）
+
+由于代理对 github HTTPS 长传输不稳定，**vcpkg 跑不了 manifest mode**（baseline fetch 持续超时）。本机 Linux 走的路径：
+
+1. **vcpkg classic mode**：用本地 `/data/wangzhaolong/Code/Cpp/vcpkg` 直接逐个 `./vcpkg install <port>:x64-linux`。
+   - 必装：`metis cgal gtest poselib faiss glew openimageio` 加 `'ceres[lapack,schur,suitesparse]'`（默认 ceres 缺 suitesparse，COLMAP 的 `find_package(CHOLMOD REQUIRED)` 会失败）。
+   - **OpenImageIO 的 source tarball 必须走 gh-proxy.com 镜像下到 `/data/wangzhaolong/Code/Cpp/vcpkg/downloads/AcademySoftwareFoundation-OpenImageIO-v3.0.9.1.tar.gz`**（github 直连 + proxy 都会被截断）：
+     ```bash
+     unset https_proxy http_proxy
+     wget -O AcademySoftwareFoundation-OpenImageIO-v3.0.9.1.tar.gz \
+       "https://gh-proxy.com/https://github.com/AcademySoftwareFoundation/OpenImageIO/archive/v3.0.9.1.tar.gz"
+     ```
+
+2. **`cmake/FindCHOLMOD.cmake` 已修**：vcpkg 的 CHOLMOD target 名是 `SuiteSparse::CHOLMOD_static`（不是 `CHOLMOD::CHOLMOD`），原版 find module 不识别就 fallback 到 raw `find_library(cholmod)` 丢传递依赖。已加 alias 路径，Windows 上无影响。
+
+3. **vcpkg `lapack-reference` 缺 BLAS 传递依赖**：本地 hack 在 `/data/wangzhaolong/Code/Cpp/vcpkg/installed/x64-linux/share/lapack-reference/lapack-targets-release.cmake` 把 `IMPORTED_LOCATION_RELEASE` 改指向 `libopenblas.a`（openblas 已含 LAPACK）。如果 vcpkg 重装 lapack-reference 此 hack 会被覆盖。
+
+4. **链接 group flag**：cmake configure 时必须加 `CMAKE_CXX_STANDARD_LIBRARIES="-Wl,--start-group .../liblapack.a .../libopenblas.a -Wl,--end-group -lgfortran"`，否则 faiss → lapack → blas 单 pass 链接失败。
+
+5. **`src/colmap/exe/sfm.cc` 历史曾缺一行 `#include "colmap/exe/gui.h"`**（commit `8838ed64` 误删；GUI=ON 时不暴露，GUI=OFF 立刻报 `QApplication 未定义`）。已在 commit `f3d93ede` 修复。
+
+6. **build 目录命名**：Linux 用 `build-linux-cpu/`（`-DCUDA_ENABLED=OFF`）和 `build-linux-cuda/`（`-DCUDA_ENABLED=ON -DCMAKE_CUDA_ARCHITECTURES=89`，CUDA 走系统 `/usr/local/cuda-12.8`，gcc-13 兼容无需 `CUDAHOSTCXX` hack）。Linux 一律 `-DGUI_ENABLED=OFF -DONNX_ENABLED=OFF`（ONNX 的 ALIKED/onnx_matchers 测试段错误）。
+
+7. **CUDA tree 的 ctest exclusion**（与 CI 一致）：`ctest -E "(feature/sift_test)|(mvs/gpu_mat_test)"`。
+
+完整可复用的环境/cmake 命令模板见 `/tmp/colmap-linux-build-helper.sh`（session 内）。
 
 `build/` 目录一直保留已配置过的 CMake 缓存；除非用户明确要求"删除缓存重新构建"，**优先走增量 ninja**，不要重新跑 `cmake ..`：
 
@@ -74,7 +110,11 @@ Windows + MSVC 上有一个 force-include 兼容层 `src/thirdparty/symforce_cas
 运行单个 C++ 测试（AGENTS.md 里有完整语法，这里是常用速记）：
 
 ```bash
+# 跑整个测试 binary
 ctest --test-dir build -R "^scene/reconstruction_test$" --output-on-failure
+
+# 只跑该 binary 内的某些 GTest case
+./build/Release/src/colmap/scene/reconstruction_test --gtest_filter='ReconstructionTest.AddPoint*'
 ```
 
 ## 分支状态
@@ -143,7 +183,7 @@ scripts/format/python.sh      # ruff format + check
 
 - **不要替用户重新跑 cmake 配置步骤**。CMake 重配会触发 vcpkg 重新拉依赖，耗时十几分钟到几十分钟。除非 `CMakeCache.txt` 明显坏了或用户要求，永远走增量构建。
 - **多线程默认 `-j 32`**。用户机器核心多，单 job 会严重拖慢构建。
-- CLI 子命令入口在 `src/colmap/exe/colmap.cc`（dispatcher），各领域具体实现在同目录下的 `*.cc` 文件。添加新子命令时两处都要改。
+- CLI 子命令分两层：dispatcher 在 `src/colmap/exe/colmap.cc`（注册 name → entry 函数），实现按领域分散在 `src/colmap/exe/{sfm,mvs,feature,model,...}.cc`。`6dof-lidar` 的 `six_dof_prior_global_mapper` 子命令实现在 `src/colmap/exe/sfm.cc`，option binding 在 `controllers/option_manager.cc`。添加新子命令时三处都要改：dispatcher 注册 + 领域 .cc 实现 + option_manager 注册。
 - UI / GUI 相关改动（`src/colmap/ui/`）只能手动目视验证，无法自动化——如果改了 UI 代码，明确告知用户"此项仅构建通过，未跑交互测试"，不要声称"已验证"。
 - 跨 session 接手任务时，开头先 `git status` + `git log -5` 确认起点状态，不要假设上个 session 留下的中间状态还在。
 - **自研 BA 选项的命名规律**：`BundleAdjustment.*` 是底层 `BundleAdjustmentOptions` 字段；`GlobalMapper.ba_*` 是将同一字段透传到 `SixDofPriorGlobalMapper` 各阶段 BA 的别名，两套入口并存。新增 CLI 选项时两处都要注册（`option_manager.cc`）。
