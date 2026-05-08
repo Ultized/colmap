@@ -132,6 +132,21 @@ if(CASPAR_ENABLED AND CUDA_ENABLED)
         $<$<COMPILE_LANGUAGE:CUDA>:-Xcudafe=--diag_suppress=550>
         $<$<COMPILE_LANGUAGE:CXX>:$<IF:$<CXX_COMPILER_ID:MSVC>,/W0,-w>>
     )
+    # SymForce-generated CUDA headers use the POSIX `uint` typedef, which on
+    # Linux is pulled in transitively via <sys/types.h> but is absent on MSVC.
+    # We force-include a tiny compat header that adds `typedef unsigned int
+    # uint;` so the generated code compiles on Windows. A typedef (not a
+    # macro) is required: a macro replacement would also rewrite `uint1` etc.
+    # used by CUDA's own <vector_types.h> token-paste expansions, breaking
+    # tuple_size specializations.
+    if(WIN32)
+        set(_caspar_compat_h "${CMAKE_CURRENT_SOURCE_DIR}/symforce_caspar_compat.h")
+        target_compile_options(caspar_lib_core PRIVATE
+            $<$<COMPILE_LANGUAGE:CUDA>:--pre-include>
+            $<$<COMPILE_LANGUAGE:CUDA>:${_caspar_compat_h}>
+            $<$<COMPILE_LANGUAGE:CXX>:/FI${_caspar_compat_h}>
+        )
+    endif()
     message(STATUS "Configuring Caspar... done")
 
     message(STATUS "Caspar precision:  ${_caspar_precision}")

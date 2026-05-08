@@ -59,6 +59,12 @@
                 "gtest"
             ]
         },
+        "benchmarks": {
+            "description": "Build runtime benchmarks (Google Benchmark).",
+            "dependencies": [
+                "benchmark"
+            ]
+        },
         "cuda": {
             "description": "Build with CUDA support.",
             "dependencies": [
