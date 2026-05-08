@@ -51,6 +51,26 @@ cmake --build build --config Release -j 32
 
 如果 cmake configure 被 cmake 文件变更触发了软重配（vcpkg 重跑），同样需要在此环境下执行，否则 cuda 端口会 BUILD_FAILED。
 
+### CUDA 架构 / 最低版本
+
+`cmake/FindDependencies.cmake` 把 `CMAKE_CUDA_ARCHITECTURES` 固定成 `{75,80,86,89,90}`（Turing/Ampere/Ada/Hopper），`CUDA_MIN_VERSION` 提到 10.0。不再用 `native`（CMake 偶发误检本机 GPU）或 `all-major`（CI 产物膨胀）。要支持新卡或砍掉旧卡，改这一处即可。
+
+### CASPAR CUDA BA 后端（默认编入）
+
+`CASPAR_ENABLED=ON` + `CASPAR_USE_DOUBLE=ON` 是默认值，所以 colmap.exe 一律内置 SymForce/CASPAR 生成的 GPU BA 代码路径。**默认运行时仍走 Ceres**，需要 GPU BA 时显式选：
+
+```
+--Mapper.ba_local_backend caspar
+--Mapper.ba_global_backend caspar
+--BundleAdjustment.backend caspar       # 单独 bundle_adjuster 子命令
+```
+
+Windows + MSVC 上有一个 force-include 兼容层 `src/thirdparty/symforce_caspar_compat.h`，由 `src/thirdparty/CMakeLists.txt` 通过 `--pre-include` / `/FI` 注入到 `caspar_lib_core` 的编译选项里。它解决两个 SymForce 生成代码的硬伤：
+- 生成的 CUDA 头用 POSIX `uint` typedef（glibc 隐式带，MSVC 没有）。必须用 `typedef unsigned int uint;`，**不能用 `#define`**——宏会污染 CUDA 自己 `<vector_types.h>` 里 `uint1`/`uint2` 的 token-paste 展开，破坏 `tuple_size` 特化。
+- 生成的 `solver.cc` 不显式 include `<string>` / `<stdexcept>` 就用 `std::to_string` / `std::runtime_error`（libstdc++ 隐式带，MSVC 不带）。
+
+不要去改 `src/thirdparty/symforce_*` 下面 SymForce 自动生成的源文件，所有 Windows 兼容补丁都集中在那个 compat header + 注入它的 CMake 逻辑里。
+
 运行单个 C++ 测试（AGENTS.md 里有完整语法，这里是常用速记）：
 
 ```bash
