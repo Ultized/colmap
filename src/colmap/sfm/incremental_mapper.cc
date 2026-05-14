@@ -34,8 +34,10 @@
 #include "colmap/estimators/generalized_pose.h"
 #include "colmap/estimators/pose.h"
 #include "colmap/estimators/triangulation.h"
+#include "colmap/math/math.h"
 #include "colmap/scene/reconstruction_pruning.h"
 #include "colmap/sfm/incremental_mapper_impl.h"
+#include "colmap/util/string.h"
 
 #include <array>
 
@@ -72,6 +74,91 @@ IncrementalMapper::IncrementalMapper(
       reconstruction_(nullptr),
       obs_manager_(nullptr),
       triangulator_(nullptr) {}
+
+void IncrementalMapper::SetSixDofPosePriors(
+    std::vector<SixDofPosePrior> priors) {
+  image_to_six_dof_prior_.clear();
+  for (auto& prior : priors) {
+    // Only camera sensors carry image poses; ignore IMU/other sensor priors.
+    if (prior.corr_data_id.sensor_id.type != SensorType::CAMERA) {
+      continue;
+    }
+    const image_t image_id = static_cast<image_t>(prior.corr_data_id.id);
+    image_to_six_dof_prior_.emplace(image_id, std::move(prior));
+  }
+}
+
+const SixDofPosePrior* IncrementalMapper::GetSixDofPrior(
+    const image_t image_id) const {
+  const auto it = image_to_six_dof_prior_.find(image_id);
+  return it == image_to_six_dof_prior_.end() ? nullptr : &it->second;
+}
+
+bool IncrementalMapper::TryGet6DofInitPair(const Options& options,
+                                           const image_t image_id1,
+                                           const image_t image_id2,
+                                           Rigid3d& cam2_from_cam1) const {
+  const SixDofPosePrior* prior1 = GetSixDofPrior(image_id1);
+  const SixDofPosePrior* prior2 = GetSixDofPrior(image_id2);
+  if (prior1 == nullptr || prior2 == nullptr || !prior1->HasPose() ||
+      !prior2->HasPose()) {
+    return false;
+  }
+  // Relative pose implied by the priors. With image1 hard-seeded at
+  // prior1.cam_from_world, this anchors image2 exactly at prior2.cam_from_world
+  // and makes the initial triangulation metric.
+  const Rigid3d cam2_from_cam1_prior =
+      prior2->cam_from_world * Inverse(prior1->cam_from_world);
+  const double rotation_error_deg = RadToDeg(
+      Eigen::AngleAxisd(cam2_from_cam1_prior.rotation() *
+                        cam2_from_cam1.rotation().inverse())
+          .angle());
+  if (rotation_error_deg > options.six_dof_init_max_rotation_error_deg) {
+    LOG(WARNING) << StringPrintf(
+        "6DoF prior init pair (#%d, #%d) rejected: prior vs two-view rotation "
+        "discrepancy %.2f deg exceeds %.2f deg",
+        image_id1,
+        image_id2,
+        rotation_error_deg,
+        options.six_dof_init_max_rotation_error_deg);
+    return false;
+  }
+  cam2_from_cam1 = cam2_from_cam1_prior;
+  return true;
+}
+
+std::vector<AbsolutePosePriorConstraint>
+IncrementalMapper::CollectAbsolutePosePriorConstraints(
+    const BundleAdjustmentConfig& ba_config) const {
+  std::vector<AbsolutePosePriorConstraint> constraints;
+  for (const image_t image_id : ba_config.Images()) {
+    const SixDofPosePrior* prior = GetSixDofPrior(image_id);
+    if (prior == nullptr || !prior->HasPose()) {
+      continue;
+    }
+    AbsolutePosePriorConstraint constraint;
+    constraint.image_id = image_id;
+    constraint.cam_from_world = prior->cam_from_world;
+    constraint.rotation_covariance = prior->rotation_covariance;
+    constraint.position_covariance = prior->position_covariance;
+    constraints.push_back(constraint);
+  }
+  return constraints;
+}
+
+PosePriorBundleAdjustmentOptions
+IncrementalMapper::Make6DofPriorBundleAdjustmentOptions(
+    const Options& options) const {
+  PosePriorBundleAdjustmentOptions prior_options;
+  if (options.use_robust_loss_on_prior_position) {
+    prior_options.ceres->prior_position_loss_function_type =
+        CeresBundleAdjustmentOptions::LossFunctionType::CAUCHY;
+  }
+  prior_options.ceres->prior_position_loss_scale =
+      options.prior_position_loss_scale;
+  prior_options.alignment_ransac_options.random_seed = options.random_seed;
+  return prior_options;
+}
 
 void IncrementalMapper::BeginReconstruction(
     const std::shared_ptr<class Reconstruction>& reconstruction) {
@@ -172,8 +259,24 @@ void IncrementalMapper::RegisterInitialImagePair(
   // Apply two-view geometry
   //////////////////////////////////////////////////////////////////////////////
 
-  image1.FramePtr()->SetCamFromWorld(image1.CameraId(), Rigid3d());
-  image2.FramePtr()->SetCamFromWorld(image2.CameraId(), cam2_from_cam1);
+  const SixDofPosePrior* prior1 =
+      options.use_6dof_pose_prior ? GetSixDofPrior(image_id1) : nullptr;
+  const SixDofPosePrior* prior2 =
+      options.use_6dof_pose_prior ? GetSixDofPrior(image_id2) : nullptr;
+  if (prior1 != nullptr && prior2 != nullptr && prior1->HasPose() &&
+      prior2->HasPose()) {
+    // Hard-seed both poses from the 6DoF priors. This anchors the gauge and
+    // absolute scale so the initial triangulation is metric. `cam2_from_cam1`
+    // is the prior-derived relative pose (see `TryGet6DofInitPair`), so
+    // `cam2_from_cam1 * prior1` recovers exactly `prior2.cam_from_world`.
+    image1.FramePtr()->SetCamFromWorld(image1.CameraId(),
+                                       prior1->cam_from_world);
+    image2.FramePtr()->SetCamFromWorld(
+        image2.CameraId(), cam2_from_cam1 * prior1->cam_from_world);
+  } else {
+    image1.FramePtr()->SetCamFromWorld(image1.CameraId(), Rigid3d());
+    image2.FramePtr()->SetCamFromWorld(image2.CameraId(), cam2_from_cam1);
+  }
 
   //////////////////////////////////////////////////////////////////////////////
   // Update Reconstruction
@@ -948,8 +1051,6 @@ IncrementalMapper::AdjustLocalBundle(
   BundleAdjustmentConfig ba_config;
   std::unordered_set<image_t> image_ids;
   if (local_bundle.size() > 0) {
-    ba_config.FixGauge(BundleAdjustmentGauge::THREE_POINTS);
-
     // Insert the images of all local frames.
     const Image& image = reconstruction_->Image(image_id);
     std::set<frame_t> frame_ids;
@@ -1023,8 +1124,29 @@ IncrementalMapper::AdjustLocalBundle(
     // Adjust the local bundle.
     image_ids = ba_config.Images();
 
-    auto bundle_adjuster =
-        CreateDefaultBundleAdjuster(ba_options, ba_config, *reconstruction_);
+    // With 6DoF priors on images in this local window, add a soft prior
+    // constraint and let the priors anchor the gauge instead of FixGauge.
+    // The hard-seeded initial pair only anchors the start; without a soft
+    // constraint in local BA the window would drift off the metric frame.
+    std::vector<AbsolutePosePriorConstraint> absolute_pose_priors;
+    if (options.use_6dof_pose_prior) {
+      absolute_pose_priors = CollectAbsolutePosePriorConstraints(ba_config);
+    }
+
+    std::unique_ptr<BundleAdjuster> bundle_adjuster;
+    if (absolute_pose_priors.empty()) {
+      ba_config.FixGauge(BundleAdjustmentGauge::THREE_POINTS);
+      bundle_adjuster =
+          CreateDefaultBundleAdjuster(ba_options, ba_config, *reconstruction_);
+    } else {
+      bundle_adjuster = CreateAbsolutePosePriorBundleAdjuster(
+          ba_options,
+          Make6DofPriorBundleAdjustmentOptions(options),
+          DegToRad(options.six_dof_prior_rotation_stddev_deg),
+          ba_config,
+          std::move(absolute_pose_priors),
+          *reconstruction_);
+    }
     const auto summary = bundle_adjuster->Solve();
 
     report.num_adjusted_observations = summary->num_residuals / 2;
@@ -1130,8 +1252,23 @@ bool IncrementalMapper::AdjustGlobalBundle(
   const bool use_prior_position =
       options.use_prior_position && ba_config.NumImages() > 2;
 
+  std::vector<AbsolutePosePriorConstraint> absolute_pose_priors;
+  if (options.use_6dof_pose_prior && ba_config.NumImages() > 2) {
+    absolute_pose_priors = CollectAbsolutePosePriorConstraints(ba_config);
+  }
+  const bool use_6dof_prior = !absolute_pose_priors.empty();
+
   std::unique_ptr<BundleAdjuster> bundle_adjuster;
-  if (!use_prior_position) {
+  if (use_6dof_prior) {
+    // 6DoF priors uniquely determine the 7-DOF gauge, so do not FixGauge.
+    bundle_adjuster = CreateAbsolutePosePriorBundleAdjuster(
+        custom_ba_options,
+        Make6DofPriorBundleAdjustmentOptions(options),
+        DegToRad(options.six_dof_prior_rotation_stddev_deg),
+        ba_config,
+        std::move(absolute_pose_priors),
+        *reconstruction_);
+  } else if (!use_prior_position) {
     // Fixing the gauge with two cameras leads to a more stable optimization
     // with fewer steps as compared to fixing three points.
     // TODO(jsch): Investigate whether it is safe to not fix the gauge at all,
@@ -1238,7 +1375,8 @@ void IncrementalMapper::IterativeGlobalRefinement(
   for (int i = 0; i < max_num_refinements; ++i) {
     const size_t num_observations = reconstruction_->ComputeNumObservations();
     AdjustGlobalBundle(options, ba_options);
-    if (normalize_reconstruction && !options.use_prior_position) {
+    if (normalize_reconstruction && !options.use_prior_position &&
+        !options.use_6dof_pose_prior) {
       // Normalize scene for numerical stability and
       // to avoid large scale changes in the viewer.
       reconstruction_->Normalize();

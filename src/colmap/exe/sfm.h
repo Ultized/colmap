@@ -54,7 +54,8 @@ bool RunIncrementalMapperImpl(
     const std::shared_ptr<IncrementalPipelineOptions>& mapper_options,
     std::shared_ptr<ReconstructionManager>& reconstruction_manager,
     std::function<void()> initial_image_pair_callback = {},
-    std::function<void()> next_image_callback = {});
+    std::function<void()> next_image_callback = {},
+    std::vector<SixDofPosePrior> six_dof_pose_priors = {});
 
 bool RunGlobalMapperImpl(
     const std::filesystem::path& database_path,

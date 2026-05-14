@@ -29,6 +29,7 @@
 
 #pragma once
 
+#include "colmap/scene/database_sqlite.h"
 #include "colmap/scene/reconstruction_manager.h"
 #include "colmap/sfm/incremental_mapper.h"
 #include "colmap/util/base_controller.h"
@@ -156,6 +157,21 @@ struct IncrementalPipelineOptions {
   // (chi2 for 3DOF at 95% = 7.815).
   double prior_position_loss_scale = 7.815;
 
+  // Whether to use full 6DoF pose priors (position + orientation). When
+  // enabled, the position-only `use_prior_position` path is ignored.
+  bool use_6dof_pose_prior = false;
+
+  // Name of the database table holding the 6DoF pose priors.
+  std::string six_dof_pose_prior_table = "6dof_pose_priors";
+
+  // Fallback standard deviation (degrees) for the rotation component of a
+  // 6DoF prior when the prior does not carry a rotation covariance.
+  double six_dof_prior_rotation_stddev_deg = 1.0;
+
+  // Maximum rotation discrepancy (degrees) between the prior-derived relative
+  // pose and the two-view geometry for an initial pair to be hard-seeded.
+  double six_dof_init_max_rotation_error_deg = 30.0;
+
   // Path to a folder with reconstruction snapshots during incremental
   // reconstruction. Snapshots will be saved according to the specified
   // frequency of registered images.
@@ -238,6 +254,10 @@ class IncrementalPipeline : public BaseController {
 
   void Run() override;
 
+  // Provide full 6DoF pose priors to be forwarded to the incremental mapper.
+  // Must be called before `Run()` to take effect.
+  void SetSixDofPosePriors(std::vector<SixDofPosePrior> priors);
+
   // Getter functions for python pipelines.
   std::shared_ptr<const IncrementalPipelineOptions> Options() const {
     return options_;
@@ -280,6 +300,9 @@ class IncrementalPipeline : public BaseController {
   std::shared_ptr<class ReconstructionManager> reconstruction_manager_;
   std::shared_ptr<class DatabaseCache> database_cache_;
   std::shared_ptr<Timer> total_run_timer_;
+
+  // Full 6DoF pose priors forwarded to each incremental mapper instance.
+  std::vector<SixDofPosePrior> six_dof_pose_priors_;
 };
 
 }  // namespace colmap

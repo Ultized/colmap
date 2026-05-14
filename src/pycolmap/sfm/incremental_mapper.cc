@@ -173,6 +173,23 @@ void BindIncrementalPipeline(py::module& m) {
                      &Opts::prior_position_loss_scale,
                      "Threshold on the residual for the robust position prior "
                      "loss (chi2 for 3DOF at 95% = 7.815).")
+      .def_readwrite("use_6dof_pose_prior",
+                     &Opts::use_6dof_pose_prior,
+                     "Whether to use full 6DoF pose priors (position + "
+                     "orientation). When enabled, the position-only "
+                     "use_prior_position path is ignored.")
+      .def_readwrite("six_dof_pose_prior_table",
+                     &Opts::six_dof_pose_prior_table,
+                     "Name of the database table holding the 6DoF pose priors.")
+      .def_readwrite("six_dof_prior_rotation_stddev_deg",
+                     &Opts::six_dof_prior_rotation_stddev_deg,
+                     "Fallback standard deviation (degrees) for the rotation "
+                     "component of a 6DoF prior without rotation covariance.")
+      .def_readwrite("six_dof_init_max_rotation_error_deg",
+                     &Opts::six_dof_init_max_rotation_error_deg,
+                     "Maximum rotation discrepancy (degrees) between the "
+                     "prior-derived relative pose and the two-view geometry "
+                     "for an initial pair to be hard-seeded.")
       .def_readwrite("snapshot_path",
                      &Opts::snapshot_path,
                      "Path to a folder in which reconstruction snapshots will "

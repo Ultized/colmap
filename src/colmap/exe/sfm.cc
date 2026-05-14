@@ -38,6 +38,7 @@
 #include "colmap/estimators/solvers/similarity_transform.h"
 #include "colmap/estimators/view_graph_calibration.h"
 #include "colmap/exe/gui.h"
+#include "colmap/scene/database_sqlite.h"
 #include "colmap/scene/reconstruction.h"
 #include "colmap/sfm/observation_manager.h"
 #include "colmap/util/file.h"
@@ -227,7 +228,8 @@ bool RunIncrementalMapperImpl(
     const std::shared_ptr<IncrementalPipelineOptions>& mapper_options,
     std::shared_ptr<ReconstructionManager>& reconstruction_manager,
     std::function<void()> initial_image_pair_callback,
-    std::function<void()> next_image_callback) {
+    std::function<void()> next_image_callback,
+    std::vector<SixDofPosePrior> six_dof_pose_priors) {
   // If fix_existing_frames is enabled, we store the initial positions of
   // existing images in order to transform them back to the original coordinate
   // frame, as the reconstruction is normalized multiple times for numerical
@@ -245,6 +247,7 @@ bool RunIncrementalMapperImpl(
   auto database = Database::Open(database_path);
 
   IncrementalPipeline mapper(mapper_options, database, reconstruction_manager);
+  mapper.SetSixDofPosePriors(std::move(six_dof_pose_priors));
 
   // In case a new reconstruction is started, write results of individual sub-
   // models to as their reconstruction finishes instead of writing all results
@@ -482,7 +485,23 @@ int RunPosePriorMapper(int argc, char** argv) {
     return EXIT_FAILURE;
   }
 
-  if (overwrite_priors_covariance) {
+  // Full 6DoF pose priors supersede the position-only prior path: when
+  // enabled, load them from the database and disable `use_prior_position` so
+  // the two prior mechanisms do not interfere.
+  std::vector<SixDofPosePrior> six_dof_pose_priors;
+  if (options.mapper->use_6dof_pose_prior) {
+    options.mapper->use_prior_position = false;
+    six_dof_pose_priors = ReadSixDofPosePriorsFromDatabase(
+        *options.database_path, options.mapper->six_dof_pose_prior_table);
+    if (six_dof_pose_priors.empty()) {
+      LOG(ERROR) << "No 6DoF pose priors found in database table '"
+                 << options.mapper->six_dof_pose_prior_table << "'";
+      return EXIT_FAILURE;
+    }
+    LOG(INFO) << "Loaded " << six_dof_pose_priors.size()
+              << " 6DoF pose priors from table '"
+              << options.mapper->six_dof_pose_prior_table << "'";
+  } else if (overwrite_priors_covariance) {
     const Eigen::Matrix3d covariance =
         Eigen::Vector3d(
             prior_position_std_x, prior_position_std_y, prior_position_std_z)
@@ -504,7 +523,10 @@ int RunPosePriorMapper(int argc, char** argv) {
                                 *options.image_path,
                                 output_path,
                                 options.mapper,
-                                reconstruction_manager)) {
+                                reconstruction_manager,
+                                /*initial_image_pair_callback=*/{},
+                                /*next_image_callback=*/{},
+                                std::move(six_dof_pose_priors))) {
     return EXIT_FAILURE;
   }
 

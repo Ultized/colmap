@@ -142,6 +142,11 @@ IncrementalMapper::Options IncrementalPipelineOptions::Mapper() const {
   options.use_prior_position = use_prior_position;
   options.use_robust_loss_on_prior_position = use_robust_loss_on_prior_position;
   options.prior_position_loss_scale = prior_position_loss_scale;
+  options.use_6dof_pose_prior = use_6dof_pose_prior;
+  options.six_dof_pose_prior_table = six_dof_pose_prior_table;
+  options.six_dof_prior_rotation_stddev_deg = six_dof_prior_rotation_stddev_deg;
+  options.six_dof_init_max_rotation_error_deg =
+      six_dof_init_max_rotation_error_deg;
   options.random_seed = random_seed;
   return options;
 }
@@ -308,6 +313,11 @@ IncrementalPipeline::IncrementalPipeline(
   RegisterCallbacks();
 }
 
+void IncrementalPipeline::SetSixDofPosePriors(
+    std::vector<SixDofPosePrior> priors) {
+  six_dof_pose_priors_ = std::move(priors);
+}
+
 void IncrementalPipeline::Run() {
   total_run_timer_->Start();
 
@@ -318,6 +328,11 @@ void IncrementalPipeline::Run() {
 
   if (options_->use_prior_position && database_cache_->NumPosePriors() == 0) {
     LOG(WARNING) << "No pose priors";
+    return;
+  }
+
+  if (options_->use_6dof_pose_prior && six_dof_pose_priors_.empty()) {
+    LOG(WARNING) << "No 6DoF pose priors";
     return;
   }
 
@@ -332,6 +347,9 @@ void IncrementalPipeline::Run() {
 
   IncrementalMapper::Options mapper_options = options_->Mapper();
   IncrementalMapper mapper(database_cache_);
+  if (options_->use_6dof_pose_prior) {
+    mapper.SetSixDofPosePriors(six_dof_pose_priors_);
+  }
   if (Reconstruct(mapper,
                   mapper_options,
                   /*continue_reconstruction=*/continue_reconstruction) ==
@@ -411,6 +429,33 @@ IncrementalPipeline::Status IncrementalPipeline::InitializeReconstruction(
     }
   }
 
+  // With 6DoF priors, hard-seed the initial pair: overwrite `cam2_from_cam1`
+  // with the prior-derived relative pose so the initial triangulation is
+  // metric. If the pair cannot be safely hard-seeded, reject it rather than
+  // letting `RegisterInitialImagePair` seed an inconsistent frame.
+  if (mapper_options.use_6dof_pose_prior &&
+      !mapper.TryGet6DofInitPair(
+          mapper_options, image_id1, image_id2, cam2_from_cam1)) {
+    const bool both_have_priors =
+        mapper.GetSixDofPrior(image_id1) != nullptr &&
+        mapper.GetSixDofPrior(image_id2) != nullptr;
+    if (both_have_priors) {
+      LOG(ERROR) << StringPrintf(
+          "=> Initial pair #%d and #%d has 6DoF priors inconsistent with the "
+          "two-view geometry; rejecting pair.",
+          image_id1,
+          image_id2);
+      return Status::BAD_INITIAL_PAIR;
+    }
+    if (options_->IsInitialPairProvided()) {
+      LOG(WARNING) << "=> Provided initial pair lacks complete 6DoF priors; "
+                      "falling back to pure-visual initialization.";
+    } else {
+      LOG(INFO) << "=> Initial pair lacks complete 6DoF priors; trying next.";
+      return Status::BAD_INITIAL_PAIR;
+    }
+  }
+
   LOG(INFO) << StringPrintf(
       "Registering initial image pair #%d and #%d", image_id1, image_id2);
   mapper.RegisterInitialImagePair(
@@ -431,7 +476,11 @@ IncrementalPipeline::Status IncrementalPipeline::InitializeReconstruction(
 
   LOG(INFO) << "Global bundle adjustment";
   mapper.AdjustGlobalBundle(mapper_options, options_->GlobalBundleAdjustment());
-  reconstruction.Normalize();
+  // With 6DoF priors anchoring the gauge and absolute scale, normalizing the
+  // reconstruction would destroy the metric frame the priors establish.
+  if (!mapper_options.use_6dof_pose_prior) {
+    reconstruction.Normalize();
+  }
   mapper.FilterPoints(mapper_options);
   mapper.FilterFrames(mapper_options);
 

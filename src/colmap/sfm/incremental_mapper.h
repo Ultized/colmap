@@ -31,6 +31,7 @@
 
 #include "colmap/estimators/bundle_adjustment.h"
 #include "colmap/scene/database_cache.h"
+#include "colmap/scene/database_sqlite.h"
 #include "colmap/scene/reconstruction.h"
 #include "colmap/sfm/incremental_triangulator.h"
 #include "colmap/sfm/observation_manager.h"
@@ -148,6 +149,24 @@ class IncrementalMapper {
     // Threshold on the residual for the robust loss
     // (chi2 for 3DOF at 95% = 7.815)
     double prior_position_loss_scale = 7.815;
+
+    // Whether to use full 6DoF pose priors (position + orientation) read from
+    // the `six_dof_pose_prior_table` database table. When enabled, the
+    // position-only `use_prior_position` path is ignored: the initial image
+    // pair is hard-seeded from the priors (anchoring gauge and absolute scale)
+    // and local/global bundle adjustment add a soft 6DoF prior constraint.
+    bool use_6dof_pose_prior = false;
+
+    // Name of the database table holding the 6DoF pose priors.
+    std::string six_dof_pose_prior_table = "6dof_pose_priors";
+
+    // Fallback standard deviation (degrees) for the rotation component of a
+    // 6DoF prior when the prior does not carry a rotation covariance.
+    double six_dof_prior_rotation_stddev_deg = 1.0;
+
+    // Maximum rotation discrepancy (degrees) between the prior-derived relative
+    // pose and the two-view geometry for an initial pair to be hard-seeded.
+    double six_dof_init_max_rotation_error_deg = 30.0;
 
     // Number of threads.
     int num_threads = -1;
@@ -322,6 +341,24 @@ class IncrementalMapper {
   std::vector<image_t> FindLocalBundle(const Options& options,
                                        image_t image_id) const;
 
+  // Provide full 6DoF pose priors (position + orientation), keyed internally by
+  // image id. Priors whose correspondence sensor is not a camera are ignored.
+  // Must be called before `BeginReconstruction` to take effect.
+  void SetSixDofPosePriors(std::vector<SixDofPosePrior> priors);
+
+  // Returns the 6DoF prior for the given image, or nullptr if none exists.
+  const SixDofPosePrior* GetSixDofPrior(image_t image_id) const;
+
+  // If both initial-pair images carry a 6DoF prior, overwrite `cam2_from_cam1`
+  // with the prior-derived relative pose so that the initial triangulation
+  // happens at metric scale. Returns false (leaving `cam2_from_cam1` untouched)
+  // when a prior is missing or the prior-derived relative rotation deviates
+  // from the two-view geometry by more than `six_dof_init_max_rotation_error_deg`.
+  bool TryGet6DofInitPair(const Options& options,
+                          image_t image_id1,
+                          image_t image_id2,
+                          Rigid3d& cam2_from_cam1) const;
+
  private:
   struct RegistrationStatistics {
     // Number of images that are registered in at least one reconstruction.
@@ -355,6 +392,16 @@ class IncrementalMapper {
   // Registers a frame using generalized absolute pose estimation.
   bool RegisterNextGeneralFrame(const Options& options, Frame& frame);
 
+  // Collect 6DoF prior constraints for the images in `ba_config` that carry a
+  // prior, in the form consumed by `CreateAbsolutePosePriorBundleAdjuster`.
+  std::vector<AbsolutePosePriorConstraint> CollectAbsolutePosePriorConstraints(
+      const BundleAdjustmentConfig& ba_config) const;
+
+  // Build the pose-prior bundle adjustment options from the mapper options,
+  // shared by local and global 6DoF bundle adjustment.
+  PosePriorBundleAdjustmentOptions Make6DofPriorBundleAdjustmentOptions(
+      const Options& options) const;
+
   // Register / De-register frame in current reconstruction and update
   // the (shared) registration statistics.
   void RegisterFrameEvent(frame_t frame_id);
@@ -382,6 +429,11 @@ class IncrementalMapper {
   // This frame list will be non-empty, if the reconstruction is continued from
   // an existing reconstruction.
   std::unordered_set<frame_t> existing_frame_ids_;
+
+  // Full 6DoF pose priors keyed by image id (camera sensors only). Empty unless
+  // `SetSixDofPosePriors` was called. Owns the priors so the map values stay
+  // valid for the mapper's lifetime.
+  std::unordered_map<image_t, SixDofPosePrior> image_to_six_dof_prior_;
 };
 
 }  // namespace colmap

@@ -29,6 +29,7 @@
 
 #include "colmap/sfm/incremental_mapper.h"
 
+#include "colmap/math/math.h"
 #include "colmap/scene/database_cache.h"
 #include "colmap/scene/database_sqlite.h"
 #include "colmap/scene/reconstruction_matchers.h"
@@ -640,6 +641,79 @@ TEST_F(IncrementalMapperTest, RegStatsResetBetweenReconstructions) {
   EXPECT_EQ(mapper_->NumSharedRegImages(), num_reg_images_first);
 
   mapper_->EndReconstruction(/*discard=*/false);
+}
+
+TEST_F(IncrementalMapperTest, SixDofPosePriorHardSeedsMetricFrame) {
+  // Build exact 6DoF priors from the (noise-free) ground-truth poses.
+  std::vector<SixDofPosePrior> priors;
+  for (const auto& [image_id, image] : gt_reconstruction_.Images()) {
+    SixDofPosePrior prior;
+    prior.corr_data_id =
+        data_t(sensor_t(SensorType::CAMERA, image.CameraId()), image_id);
+    prior.cam_from_world = image.CamFromWorld();
+    priors.push_back(prior);
+  }
+  mapper_->SetSixDofPosePriors(priors);
+  options_.use_6dof_pose_prior = true;
+
+  ASSERT_TRUE(mapper_->FindInitialImagePair(
+      options_, image_id1_, image_id2_, cam2_from_cam1_));
+  ASSERT_TRUE(mapper_->TryGet6DofInitPair(
+      options_, image_id1_, image_id2_, cam2_from_cam1_));
+  mapper_->RegisterInitialImagePair(
+      options_, image_id1_, image_id2_, cam2_from_cam1_);
+  TriangulateInitialPair();
+  RegisterAllRemainingImages();
+  ASSERT_TRUE(mapper_->AdjustGlobalBundle(options_, BundleAdjustmentOptions()));
+
+  // All frames were registered.
+  EXPECT_EQ(reconstruction_->NumRegFrames(), gt_reconstruction_.NumRegFrames());
+
+  // The 6DoF priors anchor the metric frame, so estimated poses must match the
+  // ground truth in absolute terms (no Sim3 gauge freedom and unit scale).
+  for (const image_t image_id : reconstruction_->RegImageIds()) {
+    const Rigid3d est_cam_from_world =
+        reconstruction_->Image(image_id).CamFromWorld();
+    const Rigid3d gt_cam_from_world =
+        gt_reconstruction_.Image(image_id).CamFromWorld();
+    EXPECT_LT((est_cam_from_world.translation() -
+               gt_cam_from_world.translation())
+                  .norm(),
+              1e-3);
+    EXPECT_LT(est_cam_from_world.rotation().angularDistance(
+                  gt_cam_from_world.rotation()),
+              1e-3);
+  }
+}
+
+TEST_F(IncrementalMapperTest, SixDofPosePriorInitPairRejectsInconsistentPriors) {
+  ASSERT_TRUE(mapper_->FindInitialImagePair(
+      options_, image_id1_, image_id2_, cam2_from_cam1_));
+
+  // Provide priors for all images, but corrupt the second initial image's
+  // orientation well beyond the default 30 deg consistency threshold.
+  std::vector<SixDofPosePrior> priors;
+  for (const auto& [image_id, image] : gt_reconstruction_.Images()) {
+    SixDofPosePrior prior;
+    prior.corr_data_id =
+        data_t(sensor_t(SensorType::CAMERA, image.CameraId()), image_id);
+    prior.cam_from_world = image.CamFromWorld();
+    if (image_id == image_id2_) {
+      prior.cam_from_world.rotation() =
+          Eigen::Quaterniond(Eigen::AngleAxisd(
+              DegToRad(90.0), Eigen::Vector3d::UnitX())) *
+          prior.cam_from_world.rotation();
+    }
+    priors.push_back(prior);
+  }
+  mapper_->SetSixDofPosePriors(priors);
+  options_.use_6dof_pose_prior = true;
+
+  const Rigid3d cam2_from_cam1_before = cam2_from_cam1_;
+  EXPECT_FALSE(mapper_->TryGet6DofInitPair(
+      options_, image_id1_, image_id2_, cam2_from_cam1_));
+  // On rejection, the relative pose must be left untouched.
+  EXPECT_EQ(cam2_from_cam1_.params, cam2_from_cam1_before.params);
 }
 
 }  // namespace
