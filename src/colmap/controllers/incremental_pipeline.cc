@@ -436,9 +436,8 @@ IncrementalPipeline::Status IncrementalPipeline::InitializeReconstruction(
   if (mapper_options.use_6dof_pose_prior &&
       !mapper.TryGet6DofInitPair(
           mapper_options, image_id1, image_id2, cam2_from_cam1)) {
-    const bool both_have_priors =
-        mapper.GetSixDofPrior(image_id1) != nullptr &&
-        mapper.GetSixDofPrior(image_id2) != nullptr;
+    const bool both_have_priors = mapper.GetSixDofPrior(image_id1) != nullptr &&
+                                  mapper.GetSixDofPrior(image_id2) != nullptr;
     if (both_have_priors) {
       LOG(ERROR) << StringPrintf(
           "=> Initial pair #%d and #%d has 6DoF priors inconsistent with the "

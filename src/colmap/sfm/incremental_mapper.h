@@ -353,7 +353,8 @@ class IncrementalMapper {
   // with the prior-derived relative pose so that the initial triangulation
   // happens at metric scale. Returns false (leaving `cam2_from_cam1` untouched)
   // when a prior is missing or the prior-derived relative rotation deviates
-  // from the two-view geometry by more than `six_dof_init_max_rotation_error_deg`.
+  // from the two-view geometry by more than
+  // `six_dof_init_max_rotation_error_deg`.
   bool TryGet6DofInitPair(const Options& options,
                           image_t image_id1,
                           image_t image_id2,

@@ -676,17 +676,18 @@ TEST_F(IncrementalMapperTest, SixDofPosePriorHardSeedsMetricFrame) {
         reconstruction_->Image(image_id).CamFromWorld();
     const Rigid3d gt_cam_from_world =
         gt_reconstruction_.Image(image_id).CamFromWorld();
-    EXPECT_LT((est_cam_from_world.translation() -
-               gt_cam_from_world.translation())
-                  .norm(),
-              1e-3);
+    EXPECT_LT(
+        (est_cam_from_world.translation() - gt_cam_from_world.translation())
+            .norm(),
+        1e-3);
     EXPECT_LT(est_cam_from_world.rotation().angularDistance(
                   gt_cam_from_world.rotation()),
               1e-3);
   }
 }
 
-TEST_F(IncrementalMapperTest, SixDofPosePriorInitPairRejectsInconsistentPriors) {
+TEST_F(IncrementalMapperTest,
+       SixDofPosePriorInitPairRejectsInconsistentPriors) {
   ASSERT_TRUE(mapper_->FindInitialImagePair(
       options_, image_id1_, image_id2_, cam2_from_cam1_));
 
@@ -700,8 +701,8 @@ TEST_F(IncrementalMapperTest, SixDofPosePriorInitPairRejectsInconsistentPriors) 
     prior.cam_from_world = image.CamFromWorld();
     if (image_id == image_id2_) {
       prior.cam_from_world.rotation() =
-          Eigen::Quaterniond(Eigen::AngleAxisd(
-              DegToRad(90.0), Eigen::Vector3d::UnitX())) *
+          Eigen::Quaterniond(
+              Eigen::AngleAxisd(DegToRad(90.0), Eigen::Vector3d::UnitX())) *
           prior.cam_from_world.rotation();
     }
     priors.push_back(prior);

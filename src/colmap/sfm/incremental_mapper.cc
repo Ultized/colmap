@@ -109,10 +109,10 @@ bool IncrementalMapper::TryGet6DofInitPair(const Options& options,
   // and makes the initial triangulation metric.
   const Rigid3d cam2_from_cam1_prior =
       prior2->cam_from_world * Inverse(prior1->cam_from_world);
-  const double rotation_error_deg = RadToDeg(
-      Eigen::AngleAxisd(cam2_from_cam1_prior.rotation() *
-                        cam2_from_cam1.rotation().inverse())
-          .angle());
+  const double rotation_error_deg =
+      RadToDeg(Eigen::AngleAxisd(cam2_from_cam1_prior.rotation() *
+                                 cam2_from_cam1.rotation().inverse())
+                   .angle());
   if (rotation_error_deg > options.six_dof_init_max_rotation_error_deg) {
     LOG(WARNING) << StringPrintf(
         "6DoF prior init pair (#%d, #%d) rejected: prior vs two-view rotation "
@@ -271,8 +271,8 @@ void IncrementalMapper::RegisterInitialImagePair(
     // `cam2_from_cam1 * prior1` recovers exactly `prior2.cam_from_world`.
     image1.FramePtr()->SetCamFromWorld(image1.CameraId(),
                                        prior1->cam_from_world);
-    image2.FramePtr()->SetCamFromWorld(
-        image2.CameraId(), cam2_from_cam1 * prior1->cam_from_world);
+    image2.FramePtr()->SetCamFromWorld(image2.CameraId(),
+                                       cam2_from_cam1 * prior1->cam_from_world);
   } else {
     image1.FramePtr()->SetCamFromWorld(image1.CameraId(), Rigid3d());
     image2.FramePtr()->SetCamFromWorld(image2.CameraId(), cam2_from_cam1);

@@ -687,8 +687,7 @@ void OptionManager::AddMapperOptions() {
   AddDefaultOption("Mapper.snapshot_frames_freq",
                    &mapper->snapshot_frames_freq);
   AddDefaultOption("Mapper.fix_existing_frames", &mapper->fix_existing_frames);
-  AddDefaultOption("Mapper.use_6dof_pose_prior",
-                   &mapper->use_6dof_pose_prior);
+  AddDefaultOption("Mapper.use_6dof_pose_prior", &mapper->use_6dof_pose_prior);
   AddDefaultOption("Mapper.six_dof_pose_prior_table",
                    &mapper->six_dof_pose_prior_table);
   AddDefaultOption("Mapper.six_dof_prior_rotation_stddev_deg",
