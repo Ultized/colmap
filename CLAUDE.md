@@ -107,6 +107,11 @@ Windows + MSVC 上有一个 force-include 兼容层 `src/thirdparty/symforce_cas
 
 不要去改 `src/thirdparty/symforce_*` 下面 SymForce 自动生成的源文件，所有 Windows 兼容补丁都集中在那个 compat header + 注入它的 CMake 逻辑里。
 
+**Runtime 死路（不要再试）**：
+- 6DoF pose prior 通路（`global_mapper` / `pose_prior_mapper` 走的 `CreateAbsolutePosePriorBundleAdjuster`）选 `--*_backend caspar` 会直接 `LOG(FATAL_THROW)`：见 `src/colmap/estimators/bundle_adjustment.cc:455-463`，SymForce-Caspar 框架硬编码 pose↔point 二部结构，不支持一元位姿先验 factor。
+- `--Mapper.ba_use_gpu 1` 在本仓库当前 `vcpkg.json` 的 ceres features `{lapack, schur, suitesparse}` 下是空操作（无 CUDA feature），运行时只给一条 WARNING 后回退 CPU。
+- 想给 6DoF 通路提速优先用 CLI 调参（`ba_global_ignore_redundant_points3D 1` / `ba_global_frames_ratio 1.3` / `ba_global_points_ratio 1.3` / `ba_global_max_refinements 3`），零代码改动可拿到 ~2.8x。
+
 运行单个 C++ 测试（AGENTS.md 里有完整语法，这里是常用速记）：
 
 ```bash
